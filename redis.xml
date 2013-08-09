@@ -21,8 +21,8 @@
 #define LOGVERBOSE	100
 #define LOGNOTICE	10
 #define LOGWARNING	0
-#define LogFileLevel(%l)	$s(%l=$$$LOGDEBUG:"""%""",%l=$$$LOGVERBOSE:"""$""",%l=$$$LOGNOTICE:"""#""",1:"""*""")
-#define	LogLevel	$g($$$conf("loglevel"))
+#define LogFileLevel(%l)	$s(%l=$$$LOGDEBUG:"%",%l=$$$LOGVERBOSE:"$",%l=$$$LOGNOTICE:"#",1:"*")
+#define	LogLevel	$g($$$conf("loglevel-i"))
 #define	fs		##expression(""""_$s($$$isWINDOWS:"\",$$$isUNIX:"/",$$$isVMS:"")_"""")
 #ifdef	DebugBuild
 	#define debug(%msg)	do logdebug^redis(%msg)
@@ -45,39 +45,77 @@
 $$$CompileStamp
  /*
  * Various logging and system utilities
+ *
+ * NOTE: To track log file use 
+ * server>tail -F redis.log
+ * the "F" rather than "f" will track by filename not inode
  */
+logo 
+  ;;                _._
+  ;;           _.-``__ ''-._
+  ;;      _.-``    `.  `_.  ''-._           Redis 2.6.14 (00000000/0) 64 bit
+  ;;  .-`` .-```.  ```\/    _.,_ ''-._
+  ;; (    '      ,       .-`  | `,    )     Running in stand alone mode
+  ;; |`-._`-...-` __...-.``-._|'` _.-'|     Port: XXPORTXX
+  ;; |    `-._   `._    /     _.-'    |     PID: XXpidXX
+  ;;  `-._    `-._  `-./  _.-'    _.-'
+  ;; |`-._`-._    `-.__.-'    _.-'_.-'|
+  ;; |    `-._`-._        _.-'_.-'    |           http://redis.io
+  ;;  `-._    `-._`-.__.-'_.-'    _.-'            http://intersystems.com
+  ;; |`-._`-._    `-.__.-'    _.-'_.-'|
+  ;; |    `-._`-._        _.-'_.-'    |
+  ;;  `-._    `-._`-.__.-'_.-'    _.-'
+  ;;     `-._    `-.__.-'    _.-'
+  ;;          `-._        _.-'
+  ;;              `-.__.-'
+  return
+showLogo()	public {
+	for i=1:1:17 {
+		set line=$extract($text(logo+i),5,*)
+		if ( i=6 ) { // port
+			set line=$replace(line,"XXPORTXX",$$$conf("port"))
+		}
+		if ( i=7 ) { // pid
+			set line=$replace(line,"XXpidXX",$job)
+		}
+		do rLoggerWrite(line)
+	}
+}
 log(level,msg) public {
 	return:$$$LogLevel<=level
 	//set $$$log($increment($$$log))=$listbuild($zts,msg)
 	if ('$isobject($g(%rLogger))) {
-		set %rLogger=##class(%Stream.GlobalCharacter).%New()
-		set %rLogger.%Location=$$$loglit
-		set %rLoggerLW=$zts
+		set target=$$$conf("logfile")
+		if ( target'="stdout" ) {
+			set %rLogger=##class(%Stream.FileCharacter).%New()
+			set %rLogger.Filename=target
+		} else {
+			set %rLogger=##class(%Stream.GlobalCharacter).%New()
+		}
 	}
-	do %rLogger.WriteLine("["_$job_"] "_$zdt($zts)_" "_$$$LogFileLevel(level)_" "_msg)
+	do %rLogger.MoveToEnd()
+	set msg="["_$job_"] "_$zdt($zts)_" "_$$$LogFileLevel(level)_" "_msg
+	do rLoggerWrite(msg)
+}
+rLoggerWrite(msg) public {
+	do %rLogger.WriteLine(msg)
 	do %rLogger.%Save()
-	// dump log to filesystem every 5 seconds
-	set elapsed=$p($zts,",",2)-$p(%rLoggerLW,",",2)
-	write "elapsed=",elapsed,!
-	if ( elapsed >= 5 ) {
-		break
-		set flogger=##class(%Stream.FileCharacter).%New()
-		set flogger.Filename="redis.log"
-		do flogger.CopyFromAndSave(%rLogger)
-	}
-	set %rLoggerLW=$zts
-	
+	do %rLogger.Flush()
+	do:$$$conf("logfile")="stdout" %rLogger.OutputToDeviceAt(%rLogger.Size-$length(msg)-1,$length(msg)) write !
 }
 testLog()	public {
 	set $$$conf("dir")=$namespace
-	set $$$conf("loglevel")=1000
+	set $$$conf("loglevel")="debug"
+	set $$$conf("loglevel-i")=1000
+	set $$$conf("logfile")="stdout"
+	do log^redis($$$LOGWARNING,"redis-cache start")
+	do showLogo^redis
 	for i=1:1:50 {
-		write "testLog i=",i,!
-		do log^redis($$$LOGVERBOSE,"This is a verbose message")
-		do log^redis($$$LOGWARNING,"Danger Will Robinson!")
-		do log^redis($$$LOGNOTICE,"I am serving you notice")
-		do logdebug^redis("Find that bug, bugger!")
-		hang 1	
+		do log^redis($$$LOGVERBOSE,i_": This is a verbose message")
+		do log^redis($$$LOGWARNING,i_": Danger Will Robinson!")
+		do log^redis($$$LOGNOTICE,i_":I am serving you notice")
+		do logdebug^redis(i_": Find that bug, bugger!")
+		hang 5	
 	}
 }
 loglist(level,list) public {
@@ -90,10 +128,16 @@ logdebug(msg) public {
 	do log($$$LOGDEBUG,msg)
 }
 createDb(dbname)	public {
+	set sc=$$$OK
+	break
 	$$$debug("createDb dbname="_dbname)
-	set db=##class(SYS.Database).%New()
-	set db.Directory=$$$conf("dir")_$$$fs_dbname
-	set sc=db.%Save()
+	set dir=$system.Util.ManagerDirectory()_$$$fs_dbname
+	if ( ##class(%File).CreateDirectory(dir) ) {
+		set p("Directory")=dir
+		set sc=##class(Config.Databases).Create(dbname,.p)
+	} else {
+		set sc=$$$ERROR("Could not create directory '"_dir_"'")
+	}
 	return sc
 }
 ensureNS(ns=$$$defaultNS) [ client ] public {
@@ -128,7 +172,7 @@ ensureNS(ns=$$$defaultNS) [ client ] public {
 }
 loadConf(conf="redis.conf") public {
     try {
-	do log($$$LOGVERBOSE,"Loading conf from '"_conf_"'")
+	do log($$$LOGNOTICE,"Loading conf from '"_conf_"'")
 	set fc=##class(%Stream.FileCharacter).%New()
 	set fc.Filename=conf
 	do fc.Rewind()
@@ -136,20 +180,29 @@ loadConf(conf="redis.conf") public {
 		set line=fc.ReadLine()
 		continue:$e(line,1)="#"
 		continue:line=""
-		set key=$p(line," "),value=$p(line," ",2,*)
+		set key=$p(line," ")
+		set value=$p(line," ",2,$l(line," "))
 		$$$debug("setconf key="_key_" value="_value)
 		set $$$conf(key)=value
 	}
-	do log($$$LOGVERBOSE,"Conf loaded")
+	set ll=$$$conf("loglevel")
+	set $$$conf("loglevel-i")=$select(ll="debug":$$$LOGDEBUG,ll="verbose":$$$LOGVERBOSE,ll="notice":$$$LOGNOTICE,1:$$$LOGWARNING)
+	do log($$$LOGNOTICE,"Conf loaded")
 	return $$$OK
     } catch (exception) {
 	do exception.OutputToDevice()
 	return 0
     }
 }
+testLoadConf(conf="redis.conf") public {
+	write "testLoadConf",!
+	set sc=$$loadConf(conf)
+	zw $$$conf
+	return
+}
 server(conf="redis.conf") public {
-	quit:$$loadConf(conf)
-
+	quit:'$$loadConf(conf)
+	break
 	//kill ^redis.clients		// clean out client cache
 	if ( $namespace '= $$$defaultNS ) {
 		throw:$$$ISERR( $$ensureNS() ) 
@@ -160,9 +213,9 @@ server(conf="redis.conf") public {
 	set sock.LineTerminator=$$$CRLF
 	set sock.ConnectionQueueSize = $$$conf("maxclients")
 	set sock.KeepAliveInterval = $$$conf("tcp-keepalive")
-	set sock.Port=port
+	set sock.Port=$$$conf("port")
 	set res=sock.Open() 
-	do log($$$LOGVERBOSE,"Open res="_res_"about to listen")
+	do log($$$LOGWARNING,"Server ready to accept connections on port "_$$$conf("port"))
 	set ret=sock.ListenJob(,"redis.Server",$J_"~Parent",,,,.ok)
 	do log($$$LOGVERBOSE,"s^redis ret="_ret_" ok="_ok)
 	do log($$$LOGWARNING,"Server Shutting down...")
