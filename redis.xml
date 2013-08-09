@@ -44,7 +44,7 @@
 #Include redis
 $$$CompileStamp
  /*
- * Logging and system utilities
+ * Various logging and system utilities
  */
 log(level,msg) public {
 	return:$$$LogLevel<=level
