@@ -1,0 +1,619 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Export generator="Cache" version="25" zv="Cache for Windows (x86-64) 2013.1 (Build 446U)" ts="2013-08-07 10:36:17">
+<Routine name="redis" type="INC" timestamp="63040,75190.786812"><![CDATA[
+#undef DebugBuild		
+	
+#define HOME		""""_^||redis.conf("dir")_""""
+#define log 		^[$$$HOME]redis.log
+#define loglit		"^["""_^||redis.conf("dir")_"""]redis.log"
+#define conf		^||redis.conf
+#define	pconf		^[$$$HOME]redis.conf
+#define clients		^[$$$HOME]redis.clients
+#define control		^[$$$HOME]redis.server
+
+#define	nsPrefix	"redis"
+#define	dbPrefix	"redis"
+#define defaultRedisDB	"DB 0"
+#define defaultNS	$$$nsPrefix_"0"
+#define CRLF		$get($$$conf("crlf"),$C(13)_$C(10))
+#define VERSION		"0.1"
+#define LOGDEBUG	1000
+#define LOGVERBOSE	100
+#define LOGNOTICE	10
+#define LOGWARNING	0
+#define LogFileLevel(%l)	$s(%l=$$$LOGDEBUG:"""%""",%l=$$$LOGVERBOSE:"""$""",%l=$$$LOGNOTICE:"""#""",1:"""*""")
+#define	LogLevel	$g($$$conf("loglevel"))
+#define	fs		##expression(""""_$s($$$isWINDOWS:"\",$$$isUNIX:"/",$$$isVMS:"")_"""")
+#ifdef	DebugBuild
+	#define debug(%msg)	do logdebug^redis(%msg)
+	#define	CompileStamp    ##expression("	/* Compiled on "_$ZDT($ZTS)_" by "_$username_" DEBUG BUILD */")
+#else
+	#define debug(%msg)	// no debug	
+	#define	CompileStamp    ##expression("	/* Compiled on "_$ZDT($ZTS)_" by "_$username_" RELEASE BUILD*/")
+#endif
+
+#define keys		^keys
+#define	sets		^sets
+#define lists		^lists
+#define	hashes		^hashes
+
+]]></Routine>
+
+<Routine name="redis" type="MAC" languagemode="0" timestamp="63041,37952.690112"><![CDATA[
+#Include %occInclude
+#Include redis
+$$$CompileStamp
+ /*
+ * Logging and system utilities
+ */
+log(level,msg) public {
+	return:$$$LogLevel<=level
+	//set $$$log($increment($$$log))=$listbuild($zts,msg)
+	if ('$isobject($g(%rLogger))) {
+		set %rLogger=##class(%Stream.GlobalCharacter).%New()
+		set %rLogger.%Location=$$$loglit
+		set %rLoggerLW=$zts
+	}
+	do %rLogger.WriteLine("["_$job_"] "_$zdt($zts)_" "_$$$LogFileLevel(level)_" "_msg)
+	do %rLogger.%Save()
+	// dump log to filesystem every 5 seconds
+	set elapsed=$p($zts,",",2)-$p(%rLoggerLW,",",2)
+	write "elapsed=",elapsed,!
+	if ( elapsed >= 5 ) {
+		break
+		set flogger=##class(%Stream.FileCharacter).%New()
+		set flogger.Filename="redis.log"
+		do flogger.CopyFromAndSave(%rLogger)
+	}
+	set %rLoggerLW=$zts
+	
+}
+testLog()	public {
+	set $$$conf("dir")=$namespace
+	set $$$conf("loglevel")=1000
+	for i=1:1:50 {
+		write "testLog i=",i,!
+		do log^redis($$$LOGVERBOSE,"This is a verbose message")
+		do log^redis($$$LOGWARNING,"Danger Will Robinson!")
+		do log^redis($$$LOGNOTICE,"I am serving you notice")
+		do logdebug^redis("Find that bug, bugger!")
+		hang 1	
+	}
+}
+loglist(level,list) public {
+	do log(level,$listtostring(list))
+}
+logerror(level,error) public {
+	do log(level,$system.Status.GetErrorText(error))
+}
+logdebug(msg) public {
+	do log($$$LOGDEBUG,msg)
+}
+createDb(dbname)	public {
+	$$$debug("createDb dbname="_dbname)
+	set db=##class(SYS.Database).%New()
+	set db.Directory=$$$conf("dir")_$$$fs_dbname
+	set sc=db.%Save()
+	return sc
+}
+ensureNS(ns=$$$defaultNS) [ client ] public {
+	$$$debug("ensureSN ns="_ns)
+	// On SELECT commands, ensure the requested namespace is available
+	if ( ns?.N ) {
+		set ns=$$$nsPrefix_ns	// support redis "0","1" dbs
+	}
+	if ( '##class(%SYS.Namespace).Exists(ns) ) {
+		$$$debug("ensureNS ns="_ns_" did not exist!")
+		set dbname=ns
+		set currNS=$namespace
+		zn "%SYS"
+		set dbo=##class(Config.Databases).%OpenId(dbname)		
+		if ( '$isobject(dbo) ) {
+			$$$debug("dbo not an object, need to create db")
+			set sc=$$createDb(dbname)
+			$$$debug(sc)
+			if ($$$ISERR(sc) ) {
+				zn currNS
+				throw $$error(sc)
+			}
+		}
+		// db exist's, now create ns
+		set p("Globals")=dbname
+		set sc=##class(Config.Namespaces).Create(ns,.p)
+		// create mappings for control structures
+		$$$debug(sc)
+		throw:$$$ISERR(sc) $$error(sc)					
+	}
+	
+}
+loadConf(conf="redis.conf") public {
+    try {
+	do log($$$LOGVERBOSE,"Loading conf from '"_conf_"'")
+	set fc=##class(%Stream.FileCharacter).%New()
+	set fc.Filename=conf
+	do fc.Rewind()
+	while ( 'fc.AtEnd ) {
+		set line=fc.ReadLine()
+		continue:$e(line,1)="#"
+		continue:line=""
+		set key=$p(line," "),value=$p(line," ",2,*)
+		$$$debug("setconf key="_key_" value="_value)
+		set $$$conf(key)=value
+	}
+	do log($$$LOGVERBOSE,"Conf loaded")
+	return $$$OK
+    } catch (exception) {
+	do exception.OutputToDevice()
+	return 0
+    }
+}
+server(conf="redis.conf") public {
+	quit:$$loadConf(conf)
+
+	//kill ^redis.clients		// clean out client cache
+	if ( $namespace '= $$$defaultNS ) {
+		throw:$$$ISERR( $$ensureNS() ) 
+		zn $$$defaultNS
+	}	
+
+	set sock=##class(%IO.ServerSocket).%New()
+	set sock.LineTerminator=$$$CRLF
+	set sock.ConnectionQueueSize = $$$conf("maxclients")
+	set sock.KeepAliveInterval = $$$conf("tcp-keepalive")
+	set sock.Port=port
+	set res=sock.Open() 
+	do log($$$LOGVERBOSE,"Open res="_res_"about to listen")
+	set ret=sock.ListenJob(,"redis.Server",$J_"~Parent",,,,.ok)
+	do log($$$LOGVERBOSE,"s^redis ret="_ret_" ok="_ok)
+	do log($$$LOGWARNING,"Server Shutting down...")
+	return
+}
+	/*
+	*	Redis Protocol Command Implementations
+	*
+	*	All commands expect the following variables
+	*	to be publically accessable - the routines
+	*	are invoked by indirection
+	*
+	*	args	$list() of arguments to command
+	*	result	string with 'redisized' result, e.g. "+OK\r\n"
+	*	client	ip_addr:port of current connection (optional)
+	*
+	*	In some cases, commands delegate to other routines. 
+	* 	For example, "CLIENT LIST" would invoke:
+	*	cCLIENT -> cCLIENTcLIST
+	*	
+	*	Each redis command XYZ maps to "cXYZ"
+	*/
+
+cPING() [ args, result, client ] public {
+    kill result
+    $$$debug("PING client="_client)
+    set result="+PONG"_$$$CRLF
+    return
+}
+
+cCLIENT() [ args, result, client ] public { // deal with CLIENT commands
+	set command = $zconvert($list(args,1),"U")
+	$$$debug("CLIENT command="_command)
+	if ( "KILL,LIST,SETNAME,GETNAME"'[command ) {
+		set result = $$error("UNKNOWN CLIENT COMMAND '"_command_"'")
+		return
+	}
+	set tag="cCLIENTc"_command
+	do @tag
+	return
+}
+cCLIENTcLIST() [ args, result, client ] public {
+	set fields=$lb("addr","age","name","db")
+	set c=$order($$$clients("")),tr="",cc=0
+	while ( c'="" ) {
+		set l=""
+		for i=1:1:$ll(fields) {
+			set f = $list(fields,i)
+			set l = l_f_":"_$get($$$clients(c,f),"???")
+			set:i<$ll(fields) l=l_" "
+		}
+		//set tr=tr_"$"_$length(l)_$$$CRLF
+		//set tr=tr_l_$$$CRLF,cc=cc+1
+		set tr=tr_l_$C(10),cc=cc+1
+		set c=$order($$$clients(c))
+		//set:(c'="") tr=tr_$C(10)
+	}
+	set result="*1"_$$$CRLF_"$"_$l(tr)_$$$CRLF_tr_$$$CRLF
+	return
+}
+cCLIENTcKILL() [ args, result, client ] public {
+	set target=$list(args,2)
+	if ( '$data($$$clients(target) ) ) {
+		set result=$$error("CLIENT NOT FOUND")
+		return
+	}
+	if ( $data($$$clients(target,"busy"))) {
+		set result=$$error("CLIENT BUSY")
+		return
+	}
+	// TODO - use LOCKs on ^redis.clients here
+	do log^redis($$$LOGWARNING,"CLIENT KILL *** Locks not implemented ***")
+	kill $$$clients(target)
+	set result = "+OK"_$$$CRLF
+	return
+}
+cCLIENTcSETNAME() [ args, result, client ] public {
+	set $$$clients(client,"name")=$list(args,2)
+	set result = "+OK"_$$$CRLF
+}
+cCLIENTcGETNAME() [ args, result, client ] public {
+	$$$debug("cCLIENTcGETNAME client="_client)
+	if ( '$data($$$clients(client,"name")) ) {
+		set result = "$-1"_$$$CRLF
+		return
+	}
+	set n = $$$clients(client,"name")
+	set result = "*1"_$$$CRLF_"$"_$l(n)_$$$CRLF_n_$$$CRLF
+	return
+}
+cSELECT() [ args, result, client ] public {	// select a namespace
+	set ns=$list(args,1)
+	if ( '##class(%SYS.Namespace).Exists(ns) ) {
+		set result = $$error("Namespace does not exist")_$$$CRLF
+		return
+	}
+	zn ns
+	set $$$clients("db")=ns
+	$$$debug("SELECT client="_client_" ns="_ns)
+	set result = "+OK"_$$$CRLF
+	return
+}
+cSET() [ args,result ] public {
+    kill result
+    if ( $listlength(args)'=2 ) {
+	throw $$error("SET invliad args")
+    }
+    set key=$list(args,1),value=$list(args,2)
+    set $$$keys(key)=value
+    $$$debug("SET key="_key_" value="_value)
+    set result="+OK"_$$$CRLF
+    return
+}
+cHSET() [ args,result ] public {
+    kill result
+    if ( $listlength(args)'=3 ) {
+		throw $$error("SET invliad args")
+    }
+    $$$debug("HSET")
+    do loglist^redis($$$LOGDEBUG,args)
+    set hash=$listget(args,1)
+    set key=$listget(args,2)
+    set value=$listget(args,3)
+    $$$debug("HSET hash="_hash_" key="_key_" value="_value)
+    set $$$hashes(hash,key)=value
+    set result="+OK"_$$$CRLF
+    return
+}
+cAPPEND() [ args, result ] public {
+    kill result
+    set key=$list(args,1)
+    set val=$list(args,2)
+    $$$debug("APPEND key="_key_" val="_val_" old="_$get($$$keys(key)))
+    set $$$keys(key)=$get($$$keys(key))_val
+    set result="+OK"_$$$CRLF
+    return
+}    
+cGET() [ args,result ] public {
+    kill result
+    set key=$list(args,1)
+    if ( '$data($$$keys(key)) ) {
+	$$$debug("GET key does not exist")
+	set result="$-1"_$$$CRLF
+	return
+    }
+    set value=$$$keys(key)
+    $$$debug("GET key="_key_" value="_value)
+	if ( value?.N ) {
+		set result = ":"_value_$$$CRLF   // integer
+	} else {
+	    set result="$"_$length(value)_$$$CRLF_value_$$$CRLF
+	}
+
+    return
+}
+cGETRANGE() [ args,result ] public {
+    kill result
+    set key=$list(args,1)
+    if ( '$data($$$keys(key)) ) {
+	$$$debug("GETRANGE key does not exist")
+	set result="$-1"_$$$CRLF
+	return
+    }
+    set value=$$$keys(key)
+    $$$debug("GETRANGE key="_key_" value="_value)
+    set start=$list(args,2),end=$list(args,3)
+    set value=$extract(value,start,end)
+    $$$debug("GETRANGE start="_start_" end="_end_" value="_value)
+    if ( value?.N ) {
+		set result = ":"_value_$$$CRLF   // integer
+    } else {
+	    set result="$"_$length(value)_$$$CRLF_value_$$$CRLF
+	}
+    return
+}
+cHGET() [ args,result ] public {
+    set hash=$list(args,1),field=$list(args,2)
+    if ( '$data($$$hashes(hash,field)) ) {
+	$$$debug("HGET hash="_hash_" field="_field_" does not exist")
+	set result="$-1"_$$$CRLF
+	return
+    }
+    set value=$$$hashes(hash,field)
+    $$$debug("HGET hash="_hash_" field="_field_" value="_value)
+	if ( value?.N ) {
+		set result = ":"_value_$$$CRLF   // integer
+	} else {
+	    set result="$"_$length(value)_$$$CRLF_value_$$$CRLF
+	}
+    return
+}
+cHGETALL() [ args, result ] public {
+	kill counter,result,ref,glo
+	set hash=$list(args,1)
+	$$$debug("HGETALL hash="_hash)
+	set field=$order($$$hashes(hash,""))
+	set counter=0,result=""
+	while ( field'="" ) {
+		// key
+		set result = result_"$"_$length(field)_$$$CRLF
+		set result = result_field_$$$CRLF
+		// value
+		set value = $$$hashes(hash,field)
+		set result = result_"$"_$l(value)_$$$CRLF
+		set result = result_value_$$$CRLF 
+		set field=$order($$$hashes(hash,field))
+		set counter=counter+1
+	}
+	set result = "*"_counter_$$$CRLF_result
+	$$$debug("HGETALL result="_result)
+	return
+}
+cGETSET() [ args,result ] public {
+    do cGET
+    set tresult=result
+    do cSET
+    set result=tresult
+}
+cINCR() [ args, result ] public {
+	set key=$list(args,1)
+	set i=$i($$$keys(key))
+	$$$debug("INCR key="_key_" value="_i)
+	set result=":"_i_$$$CRLF
+	return
+}
+cINCRBY() [ args, result ] public {
+	set key=$list(args,1)
+	set by=$list(args,2)
+	set i=$i($$$keys(key),by)
+	$$$debug("INCRBY key="_key_" value="_i)
+	set result=":"_i_$$$CRLF
+	return
+}
+cINFO() [ args, result ] public {
+	set xr=$lb("# Server")
+	set xr=xr_$lb("cache_redis_server_version:"_$$$VERSION)
+	set xr=xr_$lb("os:"_$ZV)
+	set xr=xr_$lb("timestamp:"_$system.SYS.TimeStamp())
+	set xr=xr_$lb("process_id:"_$system.SYS.ProcessID())
+	set result="*"_$listlength(xr)_$$$CRLF
+	for i=1:1:$ll(xr) {
+		set li=$listget(xr,i)
+		set result=result_"$"_$length(li)_$$$CRLF_li_$$$CRLF
+	}
+	$$$debug("INFO result="_result)
+	return 
+}
+cKEYS() [ args, result ] public {
+	do log^redis($$$LOGWARNING,"KEYS command - wildcard, pattern matching not implemented")
+	set (oq,q)=$listget(args,1,"*"),mode=1
+	$$$debug("KEYS q="_q_" mode="_mode)
+	if ( q["?" ) {
+		set q=$tr(q,"?","*"),mode=2
+	}
+	if ( q["[" ) {
+		set q=$p(q,"[",1)_"*"_$p(q,"]",2),mode=3
+	}
+	kill r
+	set sc=rs.Execute($namespace,q)
+	$$$debug(sc)
+	set key=$$$keys("")
+	while ( key'="" ) {	
+		set r($i(r))=key
+		$$$debug("r("_r_")="_r(r))
+	}
+	merge s=r
+	$$$debug("s="_s)
+	if ( mode = 2 ) {
+		for i=1:1:r {
+			if ( $l(r(i))'=$l(oq) ) {
+				set s=s-1
+				kill s(i)
+			}
+		}
+	}
+	
+	if ( mode = 3 ) { 		// to-do
+		set result = $$error("Not implemented")
+	}
+	
+	set result="*"_s_$$$CRLF
+	$$$debug(result)
+
+	set i=$order(s(""))
+	while ( i'="" ) {
+		set v=s(i)
+		set result = result_"$"_$l(v)_$$$CRLF
+		set result = result_v_$$$CRLF
+		set i=$order(s(i))
+	}
+	$$$debug(result)
+	return
+}
+test1()	public {
+   set crlf=$$$CRLF
+   set longString=""
+   for i=1:1:10 { set longString=longString_$r(1000) }
+   set data(1)=$lb("*3","$3","SET","$5","mykey","$7","myvalue","*2","$3","GET","$5","mykey")
+   set data(2)=$lb("*3","$3","SET","$10","some.global","$100",longString)
+   set data(3)=$lb("*2","$3","GET","$10","some.global")
+   for i=1:1:3 {
+      set d=data(i)
+      set wireData = $listtostring(d,crlf)_crlf
+      write "testing:" zw wireData
+      //do parse(wireData,.parsed)
+      //zw parsed
+      //do process(.parsed,.result)
+      //zw result
+   }
+   return
+}
+error(message) {
+   return "-ERR "_message
+}
+benchmark(options) public {
+}
+
+]]></Routine>
+
+
+<Project name="redis" LastModified="2013-08-07 09:16:18.224976">
+  <Items>
+    <ProjectItem name="redis.INC" type="MAC"></ProjectItem>
+    <ProjectItem name="redis.MAC" type="MAC"></ProjectItem>
+    <ProjectItem name="redis.Server" type="CLS"></ProjectItem>
+  </Items>
+</Project>
+
+
+<Class name="redis.Server">
+<IncludeCode>redis</IncludeCode>
+<Super>%RegisteredObject</Super>
+<TimeChanged>63041,37620.137727</TimeChanged>
+<TimeCreated>63040,68424.573963</TimeCreated>
+
+<Property name="client">
+<Description>
+Store the client addr</Description>
+<Type>%String</Type>
+<Final>1</Final>
+</Property>
+
+<Method name="%OnNew">
+<FormalSpec>initvalue:%String</FormalSpec>
+<ReturnType>%Status</ReturnType>
+<Implementation><![CDATA[
+	set ..client = initvalue
+	return $$$OK
+]]></Implementation>
+</Method>
+
+<Method name="OnDisconnect">
+<FormalSpec>serverSocket:%IO.ServerSocket,pIntentional,pSCReason</FormalSpec>
+<ReturnType>%Status</ReturnType>
+<Implementation><![CDATA[
+	$$$debug("Disconnect client="_..client_" pIntentional="_pIntentional_" pSCReason="_pSCReason)
+	kill ^redis.clients(..client)
+	return $$$OK
+]]></Implementation>
+</Method>
+
+<Method name="OnConnected">
+<Description>
+We can do this loop/parsing much easier now.
+just read $$$CRLF lines
+*n = number of args $CRLF
+$n = number of byte in next arg $CRLF
+arg_data $CRLF</Description>
+<ClassMethod>1</ClassMethod>
+<FormalSpec>serverSocket:%IO.ServerSocket,jobArg:%String</FormalSpec>
+<PublicList>args,result,client</PublicList>
+<ReturnType>%Status</ReturnType>
+<Implementation><![CDATA[
+	set $ZT="errorTrap"
+	$$$debug("Got connection! jobArg="_jobArg)
+	$$$debug("serverSocket.Remote="_serverSocket.Remote)
+	set serverSocket.LineTerminator=$$$CRLF
+	set client = $piece(serverSocket.Remote,"|",2)
+	set disconHandler = ##class(redis.Server).%New(client)
+	$$$debug("disconHandler.client="_disconHandler.client)
+	set serverSocket.DisconnectHandler=disconHandler
+	set ^redis.clients(client,"addr")=client
+	if ( $data( $$$clients("db") ) ) {
+		set sc=$$ensureNS^redis( $$$clients("db") )
+		throw:$$$ISERR(sc) sc
+	} else { 	// no "db" for this client, default to "DB 0"
+		if ( $namespace'=$$$nsPrefix_"0" ) { // not in default
+			throw $$error^redis("Invalid NS")
+		}
+
+		set ^redis.clients(client,"db")=$namespace
+	}
+readLoop
+	$$$debug("readLoop")
+	set data=serverSocket.ReadLine(,,.sc)
+	$$$debug("data="_data)
+	
+	quit:$$$ISERR(sc) sc
+	if ( data="" ) { goto readLoop }
+	if ( $e(data,1) = "*" ) { // new batch
+		//set batch=""
+		set batchSize=$e(data,2,*)
+		set args="",cmd=""
+		$$$debug("batchSize="_batchSize)
+		for i=1:1:2*batchSize {
+			$$$debug("about to read i="_i)
+			set dummy=serverSocket.ReadLine(,,.sc)  //????
+			do:$$$ISERR(sc) logerror^redis(sc)
+			set data=serverSocket.ReadLine(,,.sc)
+			do:$$$ISERR(sc) logerror^redis(sc)
+			$$$debug("data="_data)
+			continue:(i#2=1)	// odd read are arg lengths we don't really care about
+			if ( i=2 ) {
+				set cmd="c"_$zconvert(data,"U")
+			} else {
+				set args=args_$lb(data)
+			}
+			
+		
+		}
+		
+    	set cmd=cmd_"^redis"
+	set curns=$namespace
+    	$$$debug(cmd)
+    	do loglist^redis($$$LOGDEBUG,args)
+	if ( $data(^redis.clients(client,"db") ) ) {
+		set targetns=^redis.clients(client,"db")
+		if ( targetns'=curns ) { 
+			zn atrgetns
+		}
+	}
+    	do @cmd
+	zn curns
+    	$$$debug(result)
+    	$$$debug("gonna write result="_result)
+		do serverSocket.Write(result,1,.sc)
+		do:$$$ISERR(sc) logerror^redis(sc) 
+     
+     	//$$$LOG("gonna flush")
+     	//do serverSocket.Flush()
+     	$$$debug("serverSocket.AtEnd="_serverSocket.AtEnd)
+     	goto readLoop
+		
+    	}	
+     return $$$OK
+errorTrap
+	set $ZT=""
+	set e="-ERR "_$ZE_$$$CRLF
+	do serverSocket.Write(e,1)
+	return $$$OK
+]]></Implementation>
+</Method>
+</Class>
+</Export>
