@@ -21,8 +21,10 @@
 #define LOGVERBOSE	100
 #define LOGNOTICE	10
 #define LOGWARNING	0
+#define LOGALWAYS	"LOG"
+
 #define LogFileLevel(%l)	$s(%l=$$$LOGDEBUG:"%",%l=$$$LOGVERBOSE:"$",%l=$$$LOGNOTICE:"#",1:"*")
-#define	LogLevel	$g($$$conf("loglevel-i"))
+#define	LogLevel	$g($$$conf("loglevel-i"),0)
 #define	fs		##expression(""""_$s($$$isWINDOWS:"\",$$$isUNIX:"/",$$$isVMS:"")_"""")
 #ifdef	DebugBuild
 	#define debug(%msg)	do logdebug^redis(%msg)
@@ -32,10 +34,10 @@
 	#define	CompileStamp    ##expression("	/* Compiled on "_$ZDT($ZTS)_" by "_$username_" RELEASE BUILD*/")
 #endif
 
-#define keys		^keys
-#define	sets		^sets
-#define lists		^lists
-#define	hashes		^hashes
+#define keys		^[$$$clients(client,"db")]keys
+#define	sets		^[$$$clients(client,"db")]sets
+#define lists		^[$$$clients(client,"db")]lists
+#define	hashes		^[$$$clients(client,"db")]hashes
 
 ]]></Routine>
 
@@ -81,18 +83,18 @@ showLogo()	public {
 		do rLoggerWrite(line)
 	}
 }
+initLogger() public {
+	//return:$isobject($g(%rLogger))  
+	set target=$g($$$conf("logfile"),"target")
+	if ( target'="stdout" ) {
+		set %rLogger=##class(%Stream.FileCharacter).%New()
+		set %rLogger.Filename=target
+	} else {
+		set %rLogger=##class(%Stream.GlobalCharacter).%New()
+	}
+}
 log(level,msg) public {
 	return:$$$LogLevel<=level
-	//set $$$log($increment($$$log))=$listbuild($zts,msg)
-	if ('$isobject($g(%rLogger))) {
-		set target=$$$conf("logfile")
-		if ( target'="stdout" ) {
-			set %rLogger=##class(%Stream.FileCharacter).%New()
-			set %rLogger.Filename=target
-		} else {
-			set %rLogger=##class(%Stream.GlobalCharacter).%New()
-		}
-	}
 	do %rLogger.MoveToEnd()
 	set msg="["_$job_"] "_$zdt($zts)_" "_$$$LogFileLevel(level)_" "_msg
 	do rLoggerWrite(msg)
@@ -129,13 +131,12 @@ logdebug(msg) public {
 }
 createDb(dbname)	public {
 	set sc=$$$OK
-	set curNS=$namespace
-	zn "%SYS"
+	new $namespace
+	set $namespace="%SYS"
 	$$$debug("createDb dbname="_dbname)
 	set dbNameU=$zconvert(dbname,"U")
 	if ( ##class(Config.Databases).Exists(dbNameU,.db) ) {
 		$$$debug("DB exists")
-		zn curNS
 		return $$$OK
 	} 
 	set dir=$system.Util.ManagerDirectory()_dbname
@@ -145,7 +146,6 @@ createDb(dbname)	public {
 		set created=##class(%File).CreateDirectory(dir)  
 		$$$debug("created dir = "_created)
 		if ( 'created ) {
-			zn curNS
 			return $$$ERROR("Could not create directory '"_dir_"'")
 		}
 	}
@@ -159,15 +159,13 @@ createDb(dbname)	public {
 	set db=##class(SYS.Database).%New()
 	set db.Directory=dir
 	set sc=db.%Save()
-	zn curNS
 	return sc
 }
 deleteDb(dbname) 	public {
-	set curNS=$namespace
-	zn "%SYS"
+	new $namespace
+	set $namespace="%SYS"
 	$$$debug("deleteDb dbname="_dbname)
 	set result=##class(Config.Databases).Delete(dbname)
-	zn curNS
 	$$$debug("deletDb result="_result)
 	return result
 }
@@ -180,8 +178,8 @@ ensureNS(ns=$$$defaultNS) [ client ] public {
 	}
 	$$$debug("ensureNS ns="_ns_" did not exist!")
 	set dbname=ns
-	set currNS=$namespace
-	zn "%SYS"
+	new $namespace
+	set $namespace="%SYS"
 	set dbo=##class(Config.Databases).%OpenId(dbname)		
 	if ( '$isobject(dbo) ) {
 		$$$debug("dbo not an object, need to create db")
@@ -197,7 +195,6 @@ ensureNS(ns=$$$defaultNS) [ client ] public {
 	set sc=##class(Config.Namespaces).Create(ns,.p)
 	// create mappings for control structures
 	$$$debug(sc)
-	zn currNS
 	return sc					
 }
 loadConf(conf="redis.conf") public {
@@ -206,7 +203,9 @@ loadConf(conf="redis.conf") public {
 		write "Warning: no configuration file detected - using default configuration",!
 		write "Call server^redis(path_to_conf_file) to suppy configuration",!
 	}
-	do log($$$LOGNOTICE,"Loading conf from '"_conf_"'")
+	kill $$$conf
+	break
+	do log($$$LOGALWAYS,"Loading conf from '"_conf_"'")
 	set fc=##class(%Stream.FileCharacter).%New()
 	set fc.Filename=conf
 	do fc.Rewind()
@@ -219,9 +218,11 @@ loadConf(conf="redis.conf") public {
 		$$$debug("setconf key="_key_" value="_value)
 		set $$$conf(key)=value
 	}
+	break
 	set ll=$$$conf("loglevel")
 	set $$$conf("loglevel-i")=$select(ll="debug":$$$LOGDEBUG,ll="verbose":$$$LOGVERBOSE,ll="notice":$$$LOGNOTICE,1:$$$LOGWARNING)
 	do log($$$LOGNOTICE,"Conf loaded")
+	do initLogger^redis		// in case we need a different logger
 	return $$$OK
     } catch (exception) {
 	do exception.OutputToDevice()
@@ -235,14 +236,15 @@ testLoadConf(conf="redis.conf") public {
 	return
 }
 server(conf="redis.conf") public {
-	break
 	//kill ^redis.clients		// clean out client cache
+	quit:'$$loadConf(conf)
+	do initLogger^redis
 	if ( $namespace '= $$$defaultNS ) {
 		throw:$$$ISERR( $$ensureNS() ) 
 		//zn $$$defaultNS
 	}	
 
-	quit:'$$loadConf(conf)
+	do showLogo^redis
 	set sock=##class(%IO.ServerSocket).%New()
 	set sock.LineTerminator=$$$CRLF
 	set sock.ConnectionQueueSize = $$$conf("maxclients")
@@ -346,7 +348,6 @@ cSELECT() [ args, result, client ] public {	// select a namespace
 		set result = $$error("Namespace does not exist")_$$$CRLF
 		return
 	}
-	zn ns
 	set $$$clients("db")=ns
 	$$$debug("SELECT client="_client_" ns="_ns)
 	set result = "+OK"_$$$CRLF
@@ -676,13 +677,15 @@ readLoop
     	$$$debug(cmd)
     	do loglist^redis($$$LOGDEBUG,args)
 	if ( $data(^redis.clients(client,"db") ) ) {
-		set targetns=^redis.clients(client,"db")
+		set targetns=$$$clients(client,"db")
 		if ( targetns'=curns ) { 
-			zn atrgetns
+			//zn atrgetns
 		}
+	} else { // default to "redis0"
+		set $$$clients(client,"db")=$$$defaultNS
 	}
     	do @cmd
-	zn curns
+	//zn curns
     	$$$debug(result)
     	$$$debug("gonna write result="_result)
 		do serverSocket.Write(result,1,.sc)
