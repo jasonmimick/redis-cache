@@ -130,45 +130,75 @@ logdebug(msg) public {
 createDb(dbname)	public {
 	set sc=$$$OK
 	break
+	set curNS=$namespace
+	zn "%SYS"
 	$$$debug("createDb dbname="_dbname)
-	set dir=$system.Util.ManagerDirectory()_$$$fs_dbname
-	if ( ##class(%File).CreateDirectory(dir) ) {
-		set p("Directory")=dir
-		set sc=##class(Config.Databases).Create(dbname,.p)
-	} else {
-		set sc=$$$ERROR("Could not create directory '"_dir_"'")
+	set dbNameU=$zconvert(dbname,"U")
+	if ( ##class(Config.Databases).Exists(dbNameU,.db) ) {
+		$$$debug("DB exists")
+		zn curNS
+		return $$$OK
+	} 
+	set dir=$system.Util.ManagerDirectory()_dbname
+	set dirExists=##class(%File).Exists(dir)
+	$$$debug("dirExists="_dirExists)
+	if ( 'dirExists ) {
+		set created=##class(%File).CreateDirectory(dir)  
+		$$$debug("created dir = "_created)
+		if ( 'created ) {
+			zn curNS
+			return $$$ERROR("Could not create directory '"_dir_"'")
+		}
 	}
+	set p("Directory")=dir
+	set p("Name")=dbname
+	set sc=##class(Config.Databases).Create(dbname,.p)
+	set dbo=##class(Config.Databases).Open(dbname)
+	set sc=dbo.%Save()
+	return:$$$ISERR(sc) sc
+	
+	set db=##class(SYS.Database).%New()
+	set db.Directory=dir
+	set sc=sb.%Save()
+	zn curNS
 	return sc
+}
+deleteDb(dbname) 	public {
+	set curNS=$namespace
+	zn "%SYS"
+	$$$debug("deleteDb dbname="_dbname)
+	set result=##class(Config.Databases).Delete(dbname)
+	zn curNS
+	$$$debug("deletDb result="_result)
+	return result
 }
 ensureNS(ns=$$$defaultNS) [ client ] public {
 	$$$debug("ensureSN ns="_ns)
+	return:##class(%SYS.Namespace).Exists(ns) $$$OK
 	// On SELECT commands, ensure the requested namespace is available
 	if ( ns?.N ) {
 		set ns=$$$nsPrefix_ns	// support redis "0","1" dbs
 	}
-	if ( '##class(%SYS.Namespace).Exists(ns) ) {
-		$$$debug("ensureNS ns="_ns_" did not exist!")
-		set dbname=ns
-		set currNS=$namespace
-		zn "%SYS"
-		set dbo=##class(Config.Databases).%OpenId(dbname)		
-		if ( '$isobject(dbo) ) {
-			$$$debug("dbo not an object, need to create db")
-			set sc=$$createDb(dbname)
-			$$$debug(sc)
-			if ($$$ISERR(sc) ) {
-				zn currNS
-				throw $$error(sc)
-			}
-		}
-		// db exist's, now create ns
-		set p("Globals")=dbname
-		set sc=##class(Config.Namespaces).Create(ns,.p)
-		// create mappings for control structures
+	$$$debug("ensureNS ns="_ns_" did not exist!")
+	set dbname=ns
+	set currNS=$namespace
+	zn "%SYS"
+	set dbo=##class(Config.Databases).%OpenId(dbname)		
+	if ( '$isobject(dbo) ) {
+		$$$debug("dbo not an object, need to create db")
+		set sc=$$createDb(dbname)
 		$$$debug(sc)
-		throw:$$$ISERR(sc) $$error(sc)					
+		if ($$$ISERR(sc) ) {
+			zn currNS
+			throw $$error(sc)
+		}
 	}
-	
+	// db exist's, now create ns
+	set p("Globals")=dbname
+	set sc=##class(Config.Namespaces).Create(ns,.p)
+	// create mappings for control structures
+	$$$debug(sc)
+	return sc					
 }
 loadConf(conf="redis.conf") public {
     try {
