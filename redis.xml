@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <Export generator="Cache" version="25" zv="Cache for Windows (x86-64) 2013.1 (Build 446U)" ts="2013-08-07 10:36:17">
 <Routine name="redis" type="INC" timestamp="63040,75190.786812"><![CDATA[
-#undef DebugBuild		
+#define DebugBuild		
 	
 #define HOME		""""_^||redis.conf("dir")_""""
 #define log 		^[$$$HOME]redis.log
@@ -129,7 +129,6 @@ logdebug(msg) public {
 }
 createDb(dbname)	public {
 	set sc=$$$OK
-	break
 	set curNS=$namespace
 	zn "%SYS"
 	$$$debug("createDb dbname="_dbname)
@@ -159,7 +158,7 @@ createDb(dbname)	public {
 	
 	set db=##class(SYS.Database).%New()
 	set db.Directory=dir
-	set sc=sb.%Save()
+	set sc=db.%Save()
 	zn curNS
 	return sc
 }
@@ -198,10 +197,15 @@ ensureNS(ns=$$$defaultNS) [ client ] public {
 	set sc=##class(Config.Namespaces).Create(ns,.p)
 	// create mappings for control structures
 	$$$debug(sc)
+	zn currNS
 	return sc					
 }
 loadConf(conf="redis.conf") public {
     try {
+	if ( '##class(%File).Exists(conf) ) {
+		write "Warning: no configuration file detected - using default configuration",!
+		write "Call server^redis(path_to_conf_file) to suppy configuration",!
+	}
 	do log($$$LOGNOTICE,"Loading conf from '"_conf_"'")
 	set fc=##class(%Stream.FileCharacter).%New()
 	set fc.Filename=conf
@@ -231,14 +235,14 @@ testLoadConf(conf="redis.conf") public {
 	return
 }
 server(conf="redis.conf") public {
-	quit:'$$loadConf(conf)
 	break
 	//kill ^redis.clients		// clean out client cache
 	if ( $namespace '= $$$defaultNS ) {
 		throw:$$$ISERR( $$ensureNS() ) 
-		zn $$$defaultNS
+		//zn $$$defaultNS
 	}	
 
+	quit:'$$loadConf(conf)
 	set sock=##class(%IO.ServerSocket).%New()
 	set sock.LineTerminator=$$$CRLF
 	set sock.ConnectionQueueSize = $$$conf("maxclients")
