@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <Export generator="Cache" version="25" zv="Cache for Windows (x86-64) 2013.1 (Build 446U)" ts="2013-08-07 10:36:17">
 <Routine name="redis" type="INC" timestamp="63040,75190.786812"><![CDATA[
-#undef DebugBuild		
+#define DebugBuild		
 	
 #define HOME		$namespace		
 #define log 		^redis.log
@@ -276,7 +276,7 @@ server(conf="redis.conf") public {
 	set ret=$system.Event.Clear($$$LoggerResource)
 	do initLogger^redis
 	quit:'$$loadConf(conf)
-	job loggerJob^redis
+	//job loggerJob^redis
 	set $$$conf("dir")=$namespace
 	/*
 	if ( $namespace '= $$$defaultNS ) {
@@ -287,12 +287,13 @@ server(conf="redis.conf") public {
 	do showLogo^redis
 	set sock=##class(%IO.ServerSocket).%New()
 	set sock.LineTerminator=$$$CRLF
-	set sock.ConnectionQueueSize = $$$conf("maxclients")
+	//break
+	set sock.ConnectionQueueSize = $$$conf("maxclients")+1
 	set sock.KeepAliveInterval = $$$conf("tcp-keepalive")
 	set sock.Port=$$$conf("port")
 	set res=sock.Open() 
 	do log($$$LOGWARNING,"Server ready to accept connections on port "_$$$conf("port"))
-	set ret=sock.ListenJob(,"redis.Server",$J_"~Parent",,,1,.ok)
+	set ret=sock.ListenJob(,"redis.Server",$J_"~Parent",,$$$conf("maxclients"),1,.ok)
 	do log($$$LOGVERBOSE,"s^redis ret="_ret_" ok="_ok)
 	do log($$$LOGWARNING,"Server Shutting down...")
 	set ret=$system.Event.Signal($$$LoggerResource,"EXIT")
@@ -526,6 +527,93 @@ cINCRBY() [ args, result,client ] public {
 	set result=":"_i_$$$CRLF
 	return
 }
+cLLEN() [ args, result, client ] public {
+	set key=$list(args,1)
+	if ( '$listdata($$$lists(key)) ) {
+		//nil
+		set result="$-1"_$$$CRLF
+	}
+	set i=$listlength($$$lists(key))
+	set result=":"_i_$$$CRLF
+}
+cLPUSH() [ args, result, client ] public {
+	set key=$list(args,1)
+	set value=$list(args,2)
+	$$$debug("LPUSH key="_key_" value="_value)
+	set $$$lists(key)=$lb(value)_$get($$$lists(key))
+	set result=":"_$listlength($$$lists(key))_$$$CRLF
+	return
+}
+cLPOP() [ args, result, client ] public {
+	set key=$list(args,1)
+	if ( '$listdata($$$lists(key) ) ) {
+		//nill
+		set result="$-1"_$$$CRLF
+	}
+	set value=$list($$$lists(key),1)
+	set $list($$$lists(key),1,1)=""	// remove first element
+	set result="$"_$length(value)_$$$CRLF_value_$$$CRLF
+}
+cRPUSH() [ args, result, client ] public {
+	set key=$list(args,1)
+	set value=$list(args,2)
+	$$$debug("RPUSH key="_key_" value="_value)
+	set $list($$$lists(key),*+1)=value
+	set result=":"_$listlength($$$lists(key))_$$$CRLF
+}
+cRPOP() [ args, result, client ] public {
+	set key=$list(args,1)
+	if ( '$listdata($$$lists(key) ) ) {
+		//nill
+		set result="$-1"_$$$CRLF
+	}
+	set value=$list($$$lists(key),*)
+	set length=$listlength($$$lists(key))
+	set $list($$$lists(key),length,length)=""	// remove last element
+	set result="$"_$length(value)_$$$CRLF_value_$$$CRLF
+}
+cSADD() [ args, result, client ] public {
+	set key=$list(args,1)
+	set numToAdd=$listlength(args)-1
+	if ( '$data($$$sets(key) ) ) {
+		set $$$sets(key)=$lb()
+	}
+	set count=0
+	for i=2:1:numToAdd {
+		set e=$list(args,i)
+		if ('$listfind($$$sets(key),e)) {
+		 set $list($$$sets(key),*+1)=e
+		 set count=count+1
+		}
+	}
+	set result=":"_count_$$$CRLF
+}
+cSPOP() [ args, result, client ] public {
+	// remove and return a random element from a set
+	set key=$list(args,1)
+	if ( '$listdata($$$sets(key) ) ) {
+		//nill
+		set result="$-1"_$$$CRLF
+	}
+	set i=$random($listlength($$$sets(key)))+1
+	set value=$list($$$sets(key),i)
+	set $list($$$sets(key),i,i)=""
+	set result="$"_$length(value)_$$$CRLF_value_$$$CRLF
+}
+cSMEMBERS() [ args, result, client ] public {
+	set key=$list(args,1)
+	if ( '$listdata($$$sets(key) ) ) {
+		//nill
+		set result="$-1"_$$$CRLF
+	}
+	set ll=$listlength($$$sets(key))
+	for i=1:1:ll {
+		set value=$list($$$sets(key),i)
+		set result = result_"$"_$l(value)_$$$CRLF
+		set result = result_value_$$$CRLF 
+	}
+	set result = "*"_ll_$$$CRLF_result
+}
 cINFO() [ args, result, client ] public {
 	set xr=$lb("# Server")
 	set xr=xr_$lb("cache_redis_server_version:"_$$$VERSION)
@@ -656,7 +744,8 @@ Store the client addr</Description>
 <FormalSpec>serverSocket:%IO.ServerSocket,pIntentional,pSCReason</FormalSpec>
 <ReturnType>%Status</ReturnType>
 <Implementation><![CDATA[
-	$$$debug("Disconnect client="_..client_" pIntentional="_pIntentional_" pSCReason="_pSCReason)
+	//$$$debug("Disconnect client="_..client_" pIntentional="_pIntentional_" pSCReason="_pSCReason)
+	$$$debug("Client closed connection client="_..client_" serverSocket.Remote="_serverSocket.Remote)
 	kill $$$clients(..client)
 	return $$$OK
 ]]></Implementation>
@@ -675,12 +764,11 @@ arg_data $CRLF</Description>
 <ReturnType>%Status</ReturnType>
 <Implementation><![CDATA[
 	set $ZT="errorTrap"
-	$$$debug("Got connection! jobArg="_jobArg)
-	$$$debug("serverSocket.Remote="_serverSocket.Remote)
+	$$$debug("Accepted "_serverSocket.Remote)
 	set serverSocket.LineTerminator=$$$CRLF
 	set client = $piece(serverSocket.Remote,"|",2)
 	set disconHandler = ##class(redis.Server).%New(client)
-	$$$debug("disconHandler.client="_disconHandler.client)
+	//$$$debug("disconHandler.client="_disconHandler.client)
 	set serverSocket.DisconnectHandler=disconHandler
 	set $$$clients(client,"addr")=client
 	if ( $data( $$$clients("db") ) ) {
@@ -693,8 +781,11 @@ readLoop
 	$$$debug("readLoop")
 	set data=serverSocket.ReadLine(,,.sc)
 	$$$debug("data="_data_" sc="_sc)
-	$$$debug("data=PING =>"_(data="PING"))	
 	quit:$$$ISERR(sc) sc
+	if ( 'serverSocket.IsOpen ) { 
+		$$$debug("serverSocket.IsOpen=0 client="_client)	
+		return $$$OK 
+	}
 	if ( data="" ) { goto readLoop }
 	if ( data="PING" ) {
 		// redis-benchmark sends raw "PING"
@@ -724,24 +815,20 @@ readLoop
 			
 		
 		}
+	}
 executeCmd	
     	set cmd=cmd_"^redis"
-	set curns=$namespace
     	$$$debug(cmd)
     	do loglist^redis($$$LOGDEBUG,args)
-	break
     	do @cmd
     	$$$debug(result)
     	$$$debug("gonna write result="_result)
 	do serverSocket.Write(result,1,.sc)
 	do:$$$ISERR(sc) logerror^redis(sc) 
-     
-     	//$$$LOG("gonna flush")
-     	//do serverSocket.Flush()
      	$$$debug("serverSocket.AtEnd="_serverSocket.AtEnd)
-     	goto readLoop
-		
-    	}	
+	if ( 'serverSocket.AtEnd ) {
+     		goto readLoop
+	}
      return $$$OK
 errorTrap
 	set $ZT=""
