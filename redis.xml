@@ -3,13 +3,13 @@
 <Routine name="redis" type="INC" timestamp="63040,75190.786812"><![CDATA[
 #define DebugBuild		
 	
-#define HOME		""""_^||redis.conf("dir")_""""
-#define log 		^[$$$HOME]redis.log
+#define HOME		$namespace		
+#define log 		^redis.log
 #define loglit		"^["""_^||redis.conf("dir")_"""]redis.log"
-#define conf		^||redis.conf
-#define	pconf		^[$$$HOME]redis.conf
-#define clients		^[$$$HOME]redis.clients
-#define control		^[$$$HOME]redis.server
+#define conf		^redis.conf
+#define	pconf		^redis.conf
+#define clients		^redis.clients
+#define control		^redis.server
 
 #define	nsPrefix	"redis"
 #define	dbPrefix	"redis"
@@ -24,7 +24,8 @@
 #define LOGALWAYS	"LOG"
 
 #define LogFileLevel(%l)	$s(%l=$$$LOGDEBUG:"%",%l=$$$LOGVERBOSE:"$",%l=$$$LOGNOTICE:"#",1:"*")
-#define	LogLevel	$g($$$conf("loglevel-i"),0)
+#define	LogLevel	##expression($g($$$conf("loglevel-i"),0))
+#define LoggerResource	"RedisLogger"
 #define	fs		##expression(""""_$s($$$isWINDOWS:"\",$$$isUNIX:"/",$$$isVMS:"")_"""")
 #ifdef	DebugBuild
 	#define debug(%msg)	do logdebug^redis(%msg)
@@ -80,30 +81,60 @@ showLogo()	public {
 		if ( i=7 ) { // pid
 			set line=$replace(line,"XXpidXX",$job)
 		}
-		do rLoggerWrite(line)
+		do forceLog($$$LOGALWAYS,line)
 	}
 }
 initLogger() public {
 	//return:$isobject($g(%rLogger))  
-	set target=$g($$$conf("logfile"),"target")
+	set target=$g($$$conf("logfile"),"stdout")
+	//break
 	if ( target'="stdout" ) {
 		set %rLogger=##class(%Stream.FileCharacter).%New()
 		set %rLogger.Filename=target
 	} else {
 		set %rLogger=##class(%Stream.GlobalCharacter).%New()
 	}
+	write "Logging to:",target,!
+}
+loggerJob() public {	// kick off a job
+	// which sits and spins on the ^||redis.log global
+	// writing records to the log target (file or stdout)
+	do initLogger()
+	set watchLog=1
+	while ( watchLog ) {
+		set ret=$system.Event.WaitMsg($$$LoggerResource,5)
+		set msg=$list(ret,2),^fool($i(^fool))=msg
+		if ( msg = "EXIT" ) {
+			set watchLog=0
+			continue
+		}
+		if ( $piece(msg,"~",1)="LOG" ) {
+			set logi=$piece(msg,"~",2)
+			set lmsg=$get( ^redis.log(logi), "???" )
+			do rLoggerWrite(lmsg)
+		}
+	}
 }
 log(level,msg) public {
-	return:$$$LogLevel<=level
-	do %rLogger.MoveToEnd()
+	//write "level=",level," LogLevel=",$$$LogLevel,!
+	if ( level > $$$LogLevel ) { return } 
+	do forceLog(level,msg)
+}
+forceLog(level,msg) public {
 	set msg="["_$job_"] "_$zdt($zts)_" "_$$$LogFileLevel(level)_" "_msg
-	do rLoggerWrite(msg)
+	//do rLoggerWrite(msg)
+	set i=$increment(^redis.log)
+	set ^redis.log(i)=msg
+	do $system.Event.Signal($$$LoggerResource,"LOG"_"~"_i)
 }
 rLoggerWrite(msg) public {
+	do %rLogger.MoveToEnd()
 	do %rLogger.WriteLine(msg)
 	do %rLogger.%Save()
-	do %rLogger.Flush()
-	do:$$$conf("logfile")="stdout" %rLogger.OutputToDeviceAt(%rLogger.Size-$length(msg)-1,$length(msg)) write !
+	if ( $get($$$conf("logfile"),"stdout") = "stdout" ) {
+		do %rLogger.OutputToDeviceAt(%rLogger.Size-$length(msg)-1,$length(msg)) 
+		write !
+	}
 }
 testLog()	public {
 	set $$$conf("dir")=$namespace
@@ -202,10 +233,12 @@ loadConf(conf="redis.conf") public {
 	if ( '##class(%File).Exists(conf) ) {
 		write "Warning: no configuration file detected - using default configuration",!
 		write "Call server^redis(path_to_conf_file) to suppy configuration",!
+		write "TODO--- Implement all defaults for conf",!
+		throw "FOO"
 	}
 	kill $$$conf
-	break
-	do log($$$LOGALWAYS,"Loading conf from '"_conf_"'")
+	//break
+	do forceLog($$$LOGALWAYS,"Loading conf from '"_conf_"'")
 	set fc=##class(%Stream.FileCharacter).%New()
 	set fc.Filename=conf
 	do fc.Rewind()
@@ -218,7 +251,7 @@ loadConf(conf="redis.conf") public {
 		$$$debug("setconf key="_key_" value="_value)
 		set $$$conf(key)=value
 	}
-	break
+	//break
 	set ll=$$$conf("loglevel")
 	set $$$conf("loglevel-i")=$select(ll="debug":$$$LOGDEBUG,ll="verbose":$$$LOGVERBOSE,ll="notice":$$$LOGNOTICE,1:$$$LOGWARNING)
 	do log($$$LOGNOTICE,"Conf loaded")
@@ -236,14 +269,21 @@ testLoadConf(conf="redis.conf") public {
 	return
 }
 server(conf="redis.conf") public {
-	//kill ^redis.clients		// clean out client cache
-	quit:'$$loadConf(conf)
+	kill $$$log
+	kill $$$clients
+	kill $$$conf
+	set ret=$system.Event.Create($$$LoggerResource)	
+	set ret=$system.Event.Clear($$$LoggerResource)
 	do initLogger^redis
+	quit:'$$loadConf(conf)
+	job loggerJob^redis
+	set $$$conf("dir")=$namespace
+	/*
 	if ( $namespace '= $$$defaultNS ) {
 		throw:$$$ISERR( $$ensureNS() ) 
 		//zn $$$defaultNS
 	}	
-
+	*/
 	do showLogo^redis
 	set sock=##class(%IO.ServerSocket).%New()
 	set sock.LineTerminator=$$$CRLF
@@ -252,9 +292,10 @@ server(conf="redis.conf") public {
 	set sock.Port=$$$conf("port")
 	set res=sock.Open() 
 	do log($$$LOGWARNING,"Server ready to accept connections on port "_$$$conf("port"))
-	set ret=sock.ListenJob(,"redis.Server",$J_"~Parent",,,,.ok)
+	set ret=sock.ListenJob(,"redis.Server",$J_"~Parent",,,1,.ok)
 	do log($$$LOGVERBOSE,"s^redis ret="_ret_" ok="_ok)
 	do log($$$LOGWARNING,"Server Shutting down...")
+	set ret=$system.Event.Signal($$$LoggerResource,"EXIT")
 	return
 }
 	/*
@@ -353,7 +394,7 @@ cSELECT() [ args, result, client ] public {	// select a namespace
 	set result = "+OK"_$$$CRLF
 	return
 }
-cSET() [ args,result ] public {
+cSET() [ args,result, client ] public {
     kill result
     if ( $listlength(args)'=2 ) {
 	throw $$error("SET invliad args")
@@ -364,7 +405,7 @@ cSET() [ args,result ] public {
     set result="+OK"_$$$CRLF
     return
 }
-cHSET() [ args,result ] public {
+cHSET() [ args,result, client ] public {
     kill result
     if ( $listlength(args)'=3 ) {
 		throw $$error("SET invliad args")
@@ -379,7 +420,7 @@ cHSET() [ args,result ] public {
     set result="+OK"_$$$CRLF
     return
 }
-cAPPEND() [ args, result ] public {
+cAPPEND() [ args, result,client ] public {
     kill result
     set key=$list(args,1)
     set val=$list(args,2)
@@ -388,9 +429,10 @@ cAPPEND() [ args, result ] public {
     set result="+OK"_$$$CRLF
     return
 }    
-cGET() [ args,result ] public {
+cGET() [ args,result,client ] public {
     kill result
     set key=$list(args,1)
+    $$$debug("GET key="_key)
     if ( '$data($$$keys(key)) ) {
 	$$$debug("GET key does not exist")
 	set result="$-1"_$$$CRLF
@@ -406,7 +448,7 @@ cGET() [ args,result ] public {
 
     return
 }
-cGETRANGE() [ args,result ] public {
+cGETRANGE() [ args,result, client ] public {
     kill result
     set key=$list(args,1)
     if ( '$data($$$keys(key)) ) {
@@ -426,7 +468,7 @@ cGETRANGE() [ args,result ] public {
 	}
     return
 }
-cHGET() [ args,result ] public {
+cHGET() [ args,result,client ] public {
     set hash=$list(args,1),field=$list(args,2)
     if ( '$data($$$hashes(hash,field)) ) {
 	$$$debug("HGET hash="_hash_" field="_field_" does not exist")
@@ -442,8 +484,8 @@ cHGET() [ args,result ] public {
 	}
     return
 }
-cHGETALL() [ args, result ] public {
-	kill counter,result,ref,glo
+cHGETALL() [ args, result,client ] public {
+	kill counter,result
 	set hash=$list(args,1)
 	$$$debug("HGETALL hash="_hash)
 	set field=$order($$$hashes(hash,""))
@@ -459,24 +501,24 @@ cHGETALL() [ args, result ] public {
 		set field=$order($$$hashes(hash,field))
 		set counter=counter+1
 	}
-	set result = "*"_counter_$$$CRLF_result
+	set result = "*"_(2*counter)_$$$CRLF_result
 	$$$debug("HGETALL result="_result)
 	return
 }
-cGETSET() [ args,result ] public {
+cGETSET() [ args,result,client ] public {
     do cGET
     set tresult=result
     do cSET
     set result=tresult
 }
-cINCR() [ args, result ] public {
+cINCR() [ args, result,client ] public {
 	set key=$list(args,1)
 	set i=$i($$$keys(key))
 	$$$debug("INCR key="_key_" value="_i)
 	set result=":"_i_$$$CRLF
 	return
 }
-cINCRBY() [ args, result ] public {
+cINCRBY() [ args, result,client ] public {
 	set key=$list(args,1)
 	set by=$list(args,2)
 	set i=$i($$$keys(key),by)
@@ -484,13 +526,21 @@ cINCRBY() [ args, result ] public {
 	set result=":"_i_$$$CRLF
 	return
 }
-cINFO() [ args, result ] public {
+cINFO() [ args, result, client ] public {
 	set xr=$lb("# Server")
 	set xr=xr_$lb("cache_redis_server_version:"_$$$VERSION)
 	set xr=xr_$lb("os:"_$ZV)
 	set xr=xr_$lb("timestamp:"_$system.SYS.TimeStamp())
 	set xr=xr_$lb("process_id:"_$system.SYS.ProcessID())
+	set xr=xr_$lb(" ")
+	set xr=xr_$lb("# redis.conf")
+	set key=$order($$$conf(""))
+	while ( key'="" ) {
+		set xr=xr_$lb(key_":"_$$$conf(key))
+		set key=$order($$$conf(key))
+	}
 	set result="*"_$listlength(xr)_$$$CRLF
+	do loglist^redis($$$LOGDEBUG,xr)
 	for i=1:1:$ll(xr) {
 		set li=$listget(xr,i)
 		set result=result_"$"_$length(li)_$$$CRLF_li_$$$CRLF
@@ -498,7 +548,7 @@ cINFO() [ args, result ] public {
 	$$$debug("INFO result="_result)
 	return 
 }
-cKEYS() [ args, result ] public {
+cKEYS() [ args, result, client ] public {
 	do log^redis($$$LOGWARNING,"KEYS command - wildcard, pattern matching not implemented")
 	set (oq,q)=$listget(args,1,"*"),mode=1
 	$$$debug("KEYS q="_q_" mode="_mode)
@@ -607,7 +657,7 @@ Store the client addr</Description>
 <ReturnType>%Status</ReturnType>
 <Implementation><![CDATA[
 	$$$debug("Disconnect client="_..client_" pIntentional="_pIntentional_" pSCReason="_pSCReason)
-	kill ^redis.clients(..client)
+	kill $$$clients(..client)
 	return $$$OK
 ]]></Implementation>
 </Method>
@@ -621,7 +671,7 @@ $n = number of byte in next arg $CRLF
 arg_data $CRLF</Description>
 <ClassMethod>1</ClassMethod>
 <FormalSpec>serverSocket:%IO.ServerSocket,jobArg:%String</FormalSpec>
-<PublicList>args,result,client</PublicList>
+<PublicList>args,result,client,%rLogger</PublicList>
 <ReturnType>%Status</ReturnType>
 <Implementation><![CDATA[
 	set $ZT="errorTrap"
@@ -632,16 +682,12 @@ arg_data $CRLF</Description>
 	set disconHandler = ##class(redis.Server).%New(client)
 	$$$debug("disconHandler.client="_disconHandler.client)
 	set serverSocket.DisconnectHandler=disconHandler
-	set ^redis.clients(client,"addr")=client
+	set $$$clients(client,"addr")=client
 	if ( $data( $$$clients("db") ) ) {
 		set sc=$$ensureNS^redis( $$$clients("db") )
 		throw:$$$ISERR(sc) sc
-	} else { 	// no "db" for this client, default to "DB 0"
-		if ( $namespace'=$$$nsPrefix_"0" ) { // not in default
-			throw $$error^redis("Invalid NS")
-		}
-
-		set ^redis.clients(client,"db")=$namespace
+	} else { 			
+		set $$$clients(client,"db")=$namespace
 	}
 readLoop
 	$$$debug("readLoop")
@@ -676,16 +722,8 @@ readLoop
 	set curns=$namespace
     	$$$debug(cmd)
     	do loglist^redis($$$LOGDEBUG,args)
-	if ( $data(^redis.clients(client,"db") ) ) {
-		set targetns=$$$clients(client,"db")
-		if ( targetns'=curns ) { 
-			//zn atrgetns
-		}
-	} else { // default to "redis0"
-		set $$$clients(client,"db")=$$$defaultNS
-	}
+	break
     	do @cmd
-	//zn curns
     	$$$debug(result)
     	$$$debug("gonna write result="_result)
 		do serverSocket.Write(result,1,.sc)
