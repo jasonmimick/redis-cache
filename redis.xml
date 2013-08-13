@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <Export generator="Cache" version="25" zv="Cache for Windows (x86-64) 2013.1 (Build 446U)" ts="2013-08-07 10:36:17">
 <Routine name="redis" type="INC" timestamp="63040,75190.786812"><![CDATA[
-#define DebugBuild		
+#undef DebugBuild		
 	
 #define HOME		$namespace		
 #define log 		^redis.log
@@ -692,10 +692,17 @@ arg_data $CRLF</Description>
 readLoop
 	$$$debug("readLoop")
 	set data=serverSocket.ReadLine(,,.sc)
-	$$$debug("data="_data)
-	
+	$$$debug("data="_data_" sc="_sc)
+	$$$debug("data=PING =>"_(data="PING"))	
 	quit:$$$ISERR(sc) sc
 	if ( data="" ) { goto readLoop }
+	if ( data="PING" ) {
+		// redis-benchmark sends raw "PING"
+		// which does not follow wire protocol
+		$$$debug("inline PING detected")
+		set cmd="c"_data,args="" 
+		goto executeCmd
+	}
 	if ( $e(data,1) = "*" ) { // new batch
 		//set batch=""
 		set batchSize=$e(data,2,*)
@@ -717,7 +724,7 @@ readLoop
 			
 		
 		}
-		
+executeCmd	
     	set cmd=cmd_"^redis"
 	set curns=$namespace
     	$$$debug(cmd)
@@ -726,8 +733,8 @@ readLoop
     	do @cmd
     	$$$debug(result)
     	$$$debug("gonna write result="_result)
-		do serverSocket.Write(result,1,.sc)
-		do:$$$ISERR(sc) logerror^redis(sc) 
+	do serverSocket.Write(result,1,.sc)
+	do:$$$ISERR(sc) logerror^redis(sc) 
      
      	//$$$LOG("gonna flush")
      	//do serverSocket.Flush()
