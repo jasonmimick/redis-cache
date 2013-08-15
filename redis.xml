@@ -289,6 +289,60 @@ testLoadConf(conf="redis.conf") public {
 	zw $$$conf
 	return
 }
+sping()		public {
+	set sc=$system.Event.Create("sping")
+	set sc=$system.Event.Clear("sping")
+	set r=$system.Event.WaitMsg("sping")
+	zw r
+}
+pingpong()	public {
+	try {
+		set port=6379,$HALT="pphalt"
+		set sock=##class(%IO.ServerSocket).%New()
+		set sock.LineTerminator=$$$CRLF
+		set sock.ConnectionQueueSize=10000
+		set sock.Port=port
+		set opened=sock.Open()
+		
+		write "opened=",opened,!
+		set maxJobs=5
+		zw sock
+		write "pingpong server listening on port=",port,!
+		//set gotConnection=sock.ListenJob(,"redis.PingServer",,maxJobs,,.sc)
+listen
+		set gotConnection=sock.Listen(,.sc)
+		write "gotConnection=",gotConnection," sc=",sc,!
+		if ($$$ISERR(sc)) {
+			write "Listen Error--- "
+			do $system.OBJ.DisplayError(sc)
+			throw ##class(%Exception.StatusException).CreateFromStatus(sc)
+		}
+		//do ##class(redis.PingServer).OnConnected(sock,"")
+		while ( 'sock.AtEnd ) {
+			set data=sock.ReadLine(,.sc)
+			write "data=",data," sc=",sc,!
+			write "codes=",$system.Status.GetErrorCodes(sc),!
+			//break
+			if ( +$system.Status.GetErrorCodes(sc)'=6219 ) {
+				write "ReadLine error---",$ZE,!
+				do $system.OBJ.DisplayError(sc)
+				do sock.Disconnect()
+				goto listen 
+			}
+			do sock.Write("+PONG"_$C(13,10),1,.sc)
+			write "sock.Write sc=",sc,!
+		}
+		goto listen
+	} catch (error) {
+		do error.OutputToDevice()
+	}
+pphalt
+	write "Got HALT $ZE=",$ZE,!
+	return
+} 
+lc() 	public {
+	do $system.OBJ.Load("/home/jmimick/redis-cache/redis.xml")
+}
 server(conf="redis.conf") public {
 	kill $$$log
 	kill $$$clients
@@ -312,12 +366,31 @@ server(conf="redis.conf") public {
 	set sock.ConnectionQueueSize = $$$conf("maxclients")+1
 	set sock.KeepAliveInterval = $$$conf("tcp-keepalive")
 	set sock.Port=$$$conf("port")
+	set $HALT="finally"
 	set res=sock.Open() 
 	do log($$$LOGWARNING,"Server ready to accept connections on port "_$$$conf("port"))
-	set ret=sock.ListenJob(,"redis.Server",$J_"~Parent",,$$$conf("maxclients"),1,.ok)
+listen
+	try {
+		set maxJobs=5
+		zw sock
+		set ret=sock.ListenJob(,"redis.Server",$J_"~Parent",,maxJobs,1,.ok)
+		write "ret=",ret,!
+		//set ret=sock.Listen(,.ok)
+		//set sc=##class(redis.Server).OnConnected(sock,$J_"~Parent")
+		goto:ok=1 listen	// keep listening
+	} catch (exception) {
+		do log($$$LOGVERBOSE,exception.DisplayString())
+		if ( exception.Data["<READ>" ) {
+			goto listen
+		}
+	} 
+finally 
+	//break
+	write "finally...",!
 	do log($$$LOGVERBOSE,"s^redis ret="_ret_" ok="_ok)
 	do log($$$LOGWARNING,"Server Shutting down...")
 	set ret=$system.Event.Signal($$$LoggerResource,"EXIT")
+	
 	return
 }
 	/*
@@ -624,7 +697,11 @@ cRPUSH() [ args, result, client ] public {
 	set key=$list(args,1)
 	set value=$list(args,2)
 	$$$debug("RPUSH key="_key_" value="_value)
+#if $ZV["2013.2"
 	set $list($$$lists(key),*+1)=value
+#else
+	set $$$lists(key)=$$$lists(key)_$lb(value)
+#endif
 	set result=":"_$listlength($$$lists(key))_$$$CRLF
 }
 cRPOP() [ args, result, client ] public {
@@ -633,7 +710,11 @@ cRPOP() [ args, result, client ] public {
 		//nill
 		set result="$-1"_$$$CRLF
 	}
+#if $ZV["2013.2"
 	set value=$list($$$lists(key),*)
+#else
+	set value=$list($$$lists(key),$listlength($$$lists(key)))
+#endif
 	set length=$listlength($$$lists(key))
 	set $list($$$lists(key),length,length)=""	// remove last element
 	set result="$"_$length(value)_$$$CRLF_value_$$$CRLF
@@ -785,6 +866,7 @@ benchmark(options) public {
     <ProjectItem name="redis.INC" type="MAC"></ProjectItem>
     <ProjectItem name="redis.MAC" type="MAC"></ProjectItem>
     <ProjectItem name="redis.Server" type="CLS"></ProjectItem>
+    <ProjectItem name="redis.PingServer" type="CLS"></ProjectItem>
   </Items>
 </Project>
 
@@ -836,6 +918,8 @@ arg_data $CRLF</Description>
 <Implementation><![CDATA[
 	set $ZT="errorTrap"
 	$$$debug("Accepted "_serverSocket.Remote)
+	// could get Cntr^C here, and no remote endpoint
+	//return:$g(serverSocket.Remote)="" $$$OK
 	set serverSocket.LineTerminator=$$$CRLF
 	set client = $piece(serverSocket.Remote,"|",2)
 	set disconHandler = ##class(redis.Server).%New(client)
@@ -852,7 +936,10 @@ readLoop
 	$$$debug("readLoop")
 	set data=serverSocket.ReadLine(,,.sc)
 	$$$debug("data="_data_" sc="_sc)
-	quit:$$$ISERR(sc) sc
+	if ( $$$ISERR(sc) ) {
+		set exp=##class(%Exception.StatusException).CreateFromStatus(sc)
+		throw exp
+	}
 	if ( 'serverSocket.IsOpen ) { 
 		$$$debug("serverSocket.IsOpen=0 client="_client)	
 		return $$$OK 
@@ -893,7 +980,6 @@ executeCmd
     	do loglist^redis($$$LOGDEBUG,args)
     	do @cmd
     	$$$debug(result)
-    	$$$debug("gonna write result="_result)
 	do serverSocket.Write(result,1,.sc)
 	do:$$$ISERR(sc) logerror^redis(sc) 
      	$$$debug("serverSocket.AtEnd="_serverSocket.AtEnd)
@@ -902,11 +988,57 @@ executeCmd
 	}
      return $$$OK
 errorTrap
-	set $ZT=""
-	set e="-ERR "_$ZE_$$$CRLF
-	do serverSocket.Write(e,1)
-	return $$$OK
+	set $ZT="",sendToClient=0
+	/// if we land here and 'exp' is set, then
+	/// we hit a read error - pass that back to server
+	/// otherwise, send error to client
+	//break
+	if ('$d(exp)) {
+		set exp=##class(%Exception.General).%New($ZE,$ZE,,$ZE)
+		set sendToClient=1
+	}
+	if ( sendToClient ) {
+		set e="-ERR "_$ZE_$$$CRLF
+		do:serverSocket.IsOpen serverSocket.Write(e,1)
+	}
+	throw exp
 ]]></Implementation>
 </Method>
 </Class>
-</Export>
+<Class name="redis.PingServer">
+<IncludeCode>redis</IncludeCode>
+<Super>%RegisteredObject</Super>
+<TimeChanged>63041,37620.137727</TimeChanged>
+<TimeCreated>63040,68424.573963</TimeCreated>
+
+<Method name="OnDisconnect">
+<FormalSpec>serverSocket:%IO.ServerSocket,pIntentional,pSCReason</FormalSpec>
+<ReturnType>%Status</ReturnType>
+<Implementation><![CDATA[
+	set ^ping("discon",$i(^ping("discon")))=$lb(serverSocker.Remote,$ZTS)
+	return $$$OK
+]]></Implementation>
+</Method>
+
+<Method name="OnConnected">
+<ClassMethod>1</ClassMethod>
+<FormalSpec>serverSocket:%IO.ServerSocket,jobArg:%String</FormalSpec>
+<ReturnType>%Status</ReturnType>
+<Implementation><![CDATA[
+	set $ZT="errorTrap"
+	set ^ping("con")=$ZTS
+	set remote=serverSocket.Remote
+	set ^ping("con",$i(^ping("con")))=$lb(remote,$ZTS)
+	//set disconHandler = ##class(redis.PingServer).%New()
+	//set serverSocket.DisconnectHandler=disconHandler
+	set data=serverSocket.ReadLine(,,.sc)
+	set ^ping(remote,$i(^ping(remote)))=data
+	do serverSocket.Write("+PONG"_$$$CRLF,1,.sc)
+     	return $$$OK
+errorTrap
+	set $ZT=""
+	set ^ping("error",$i(^ping("error")))=$lb($ZE,$ZTS)
+	return 0
+]]></Implementation>
+</Method>
+</Class></Export>
