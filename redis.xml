@@ -118,19 +118,22 @@ loggerJob() public {	// kick off a job
 	// which sits and spins on the ^||redis.log global
 	// writing records to the log target (file or stdout)
 	do initLogger()
-	set watchLog=1
+	set watchLog=1,writeCount=0
 	while ( watchLog ) {
 		set ret=$system.Event.WaitMsg($$$LoggerResource,5)
-		set msg=$list(ret,2),^fool($i(^fool))=msg
+		set msg=$list(ret,2)
 		if ( msg = "EXIT" ) {
 			set watchLog=0
+			do %rLogger.%Save()
 			continue
 		}
 		if ( $piece(msg,"~",1)="LOG" ) {
 			set logi=$piece(msg,"~",2)
 			set lmsg=$get( ^redis.log(logi), "???" )
 			do rLoggerWrite(lmsg)
+			set wc=$increment(writeCount)
 		}
+		do:(wc#100)=0 %rLogger.%Save()	// write out logfile every 100 entries
 	}
 }
 log(level,msg) public {
@@ -146,9 +149,9 @@ forceLog(level,msg) public {
 	do $system.Event.Signal($$$LoggerResource,"LOG"_"~"_i)
 }
 rLoggerWrite(msg) public {
-	do %rLogger.MoveToEnd()
+	//do %rLogger.MoveToEnd()
 	do %rLogger.WriteLine(msg)
-	do %rLogger.%Save()
+	//do %rLogger.%Save()
 	if ( $get($$$conf("logfile"),"stdout") = "stdout" ) {
 		do %rLogger.OutputToDeviceAt(%rLogger.Size-$length(msg)-1,$length(msg)) 
 		write !
@@ -294,7 +297,7 @@ server(conf="redis.conf") public {
 	set ret=$system.Event.Clear($$$LoggerResource)
 	do initLogger^redis
 	quit:'$$loadConf(conf)
-	//job loggerJob^redis
+	job:$$$conf("logfile")'="stdout" loggerJob^redis
 	set $$$conf("dir")=$namespace
 	/*
 	if ( $namespace '= $$$defaultNS ) {
@@ -688,6 +691,7 @@ cINFO() [ args, result, client ] public {
 	set xr=xr_$lb("os:"_$ZV)
 	set xr=xr_$lb("timestamp:"_$system.SYS.TimeStamp())
 	set xr=xr_$lb("process_id:"_$system.SYS.ProcessID())
+	set xr=xr_$lb("user_memory_human:"_$piece($view(-1,$job),"^",17))	
 	set xr=xr_$lb(" ")
 	set xr=xr_$lb("# redis.conf")
 	set key=$order($$$conf(""))
@@ -715,12 +719,11 @@ cKEYS() [ args, result, client ] public {
 		set q=$p(q,"[",1)_"*"_$p(q,"]",2),mode=3
 	}
 	kill r
-	set sc=rs.Execute($namespace,q)
-	$$$debug(sc)
-	set key=$$$keys("")
+	set key=$order($$$keys(""))
 	while ( key'="" ) {	
 		set r($i(r))=key
 		$$$debug("r("_r_")="_r(r))
+		set key=$order($$$keys(key))
 	}
 	merge s=r
 	$$$debug("s="_s)
