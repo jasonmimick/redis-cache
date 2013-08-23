@@ -94,6 +94,103 @@ Cache of namespaces we're already checked</Description>
 ]]></Implementation>
 </Method>
 
+<Method name="MONITOR">
+<FormalSpec>request:redis.Request</FormalSpec>
+<Private>1</Private>
+<ReturnType>redis.Response</ReturnType>
+<Implementation><![CDATA[
+	// special debugging request to track requests
+	set sc=##class(redis.Monitor).Start(.request)
+	$$$TRACE("redis.Monitor.Start returned sc="_$system.Status.GetErrorText(sc))
+	return $$$rOK
+]]></Implementation>
+</Method>
+
+<Method name="SUBSCRIBE">
+<FormalSpec>request:redis.Request</FormalSpec>
+<Private>1</Private>
+<ReturnType>redis.Response</ReturnType>
+<Implementation><![CDATA[
+	if ( $data( $$$clients(request.Client,"channels") ) ) {
+		set myChannels = $$$clients(request.Client,"channels")
+	} else {
+		set myChannels = ""
+	}
+	$$$TRACE("SUBSCRIBE channels="_$listtostring(request.Arguments)_" current ="_$listtostring(myChannels))
+	set numChannels=$listlength(request.Arguments)
+	for i=1:1:numChannels { 	// for each channel
+		set channel=$list(request.Arguments,i)
+		// does this client already subscribe?
+		if ( '$listfind(myChannels,channel) ) {
+			set $list(myChannels,$ll(myChannels)+1)=channel
+		}
+		set x=$increment($$$channels(channel))
+		set $$$channels(channel,request.Client)=x	
+		set $$$clients(request.Client,"channels")=myChannels
+		set result=$listbuild("subscribe",channel,$listlength(myChannels))
+		set response=$$$rBULK(result)
+		set sc=response.writeToStream(request.Stream)	
+	}
+	set response=##class(redis.Monitor).Subscribe(request,channel)
+	return response
+]]></Implementation>
+</Method>
+
+<Method name="UNSUBSCRIBE">
+<FormalSpec>request:redis.Request</FormalSpec>
+<Private>1</Private>
+<ReturnType>redis.Response</ReturnType>
+<Implementation><![CDATA[
+	if ( '$data( $$$clients(request.Client,"channels") ) ) {
+		// ain't got no subscriptions!
+		return $$$rERROR("No subscriptions found!")
+	}
+	if ( $listlength(request.Arguments) = 0 ) { // unsubscribe from all
+		set channels = $$$clients(request.Client,"channels")
+	} else {
+		set channels = request.Arguments
+	}
+	$$$TRACE("UNSUBSCRIBE from "_$listtostring(channels))
+	set numChannels=$listlength(channels),response=$$$rOK
+	for i=1:1:numChannels { 	// for each channel
+		set channel=$list(channels,i)
+		// does this client already subscribe?
+		set cp=$listfind( $$$clients(request.Clients,"channels"),channel )
+		if ( cp=0 ) {
+			// not subscribed, continue
+			continue
+		}
+		// remove the channel
+		set $list($$$clients(request.Client,"channels"),cp,cp+1)=""
+		kill $$$channels(channel,request.Client)	
+		set x=$increment($$$channels(channel),-1)
+		set numChannels=$listlength($$$clients(request.Client,"channels"))
+		set result=$listbuild("unsubscribe",channel,numChannels)
+		set response=$$$rBULK(result)
+		// save last response to return
+		do ##class(redis.Monitor).Unsubscribe(request,channel)
+		set:(i<numChannels) sc=response.writeToStream(request.Stream)	
+	}
+	return response
+]]></Implementation>
+</Method>
+
+<Method name="PUBLISH">
+<FormalSpec>request:redis.Request</FormalSpec>
+<Private>1</Private>
+<ReturnType>redis.Response</ReturnType>
+<Implementation><![CDATA[
+	if ( $listlength(request.Arguments)'= 2 ) {
+		return $$$rERROR("PUBLISH invalid args "_$listtostring(request.Arguments))
+	}
+	set channel=$list(request.Arguments,1)
+	set message=$list(request.Arguments,2)
+	$$$TRACE("PUBLISH channel="_channel_" message="_message)
+	set i=##class(redis.Monitor).Publish(request,channel,message)
+	return $$$rINT(i)
+]]></Implementation>
+</Method>
+
 <Method name="PING">
 <FormalSpec>request:redis.Request</FormalSpec>
 <Private>1</Private>
@@ -959,6 +1056,8 @@ Cache of namespaces we're already checked</Description>
 		}
 		$$$ANEWINIOLOGENTRY($$$OK,"redis.Inbound req :"_..IOAddr,redisRequest.toString())
 		$$$TRACE("request="_redisRequest.toString())
+		// If someone is monitoring, signal them
+		// TODO: Refactor into CommandProcessor
 		if ( $get(^redis.monitor,0)=1 ) {
 			$$$TRACE("^redis.montior is 1")
 			set rlist=$system.Event.List()
@@ -970,14 +1069,9 @@ Cache of namespaces we're already checked</Description>
 				}
 			}
 		}
-		if ( redisRequest.Command = "MONITOR" ) { 	// special debugging
-							// request to track requests
-			set sc=##class(redis.Monitor).Start(redisRequest,..Socket)
-			$$$TRACE("redis.Monitor.Start returned sc="_$system.Status.GetErrorText(sc))
-			set redisResponse=##class(redis.Response).OK(,.redisRequest)
-		} else {
-			Set tSC=..BusinessHost.ProcessInput(.redisRequest, .redisResponse)  Quit:$$$ISERR(tSC)
-		}
+		// Process the request
+		Set tSC=..BusinessHost.ProcessInput(.redisRequest, .redisResponse)  Quit:$$$ISERR(tSC)
+		
 		If $D(redisResponse) {
 			If $IsObject(redisResponse) {
 				$$$ASSERT(redisResponse.%Extends("redis.Response"))
@@ -1043,6 +1137,10 @@ IP/port of client making the request</Description>
 <MultiDimensional>1</MultiDimensional>
 </Property>
 
+<Property name="Stream">
+<Type>%IO.DeviceStream</Type>
+</Property>
+
 <Method name="CommandGet">
 <ReturnType>%String</ReturnType>
 <Implementation><![CDATA[	return $zconvert(i%Command,"U")
@@ -1066,6 +1164,14 @@ IP/port of client making the request</Description>
 		set l="empty"
 	}
 	return "Command="_c_" IsInline="_..IsInline_" Arguments="_l_" Client="_..Client
+]]></Implementation>
+</Method>
+
+<Method name="getChannelEvent">
+<FormalSpec>channel:%String</FormalSpec>
+<ReturnType>%String</ReturnType>
+<Implementation><![CDATA[
+	return "^redis.channels("""_channel_""","""_$this.Client_""")"
 ]]></Implementation>
 </Method>
 
@@ -1094,6 +1200,7 @@ IP/port of client making the request</Description>
 <Implementation><![CDATA[
 	//break
 	Set request=##class(redis.Request).%New()
+	Set request.Stream = stream
 	//Set request.Client=$piece(stream.Remote,"|",2)
 	set request.Arguments=$lb()
 	set numArgsStr=""
@@ -1525,12 +1632,79 @@ IP/port of client making the request</Description>
 <Class name="redis.Monitor">
 <IncludeCode>redis.redis</IncludeCode>
 <Super>%RegisteredObject</Super>
+
+<Method name="Subscribe">
+<ClassMethod>1</ClassMethod>
+<FormalSpec>request:redis.Request,channel:%String</FormalSpec>
+<ReturnType>%Status</ReturnType>
+<Implementation><![CDATA[
+	// wait on the channel for messages
+	// when you get one, send it to the request.Stream
+	set in=request.getChannelEvent(channel)	//"^redis.channels("""_channel_""")"
+	if ( '$system.Event.Defined(in) ) {
+		set ret=$system.Event.Create(in)
+	}
+	set subscribed=1
+	while ( subscribed ) {
+		set msgl=$system.Event.WaitMsg(in)
+		$$$TRACE("Sub got msg="_$listtostring(msgl))
+		set msg=$list(msgl,2)
+		if ( msg="UNSUBSCRIBE" ) {
+			set subscribed=0
+			quit
+		}
+		set r=$$$rBULK($listbuild("message",channel,msg))
+		set sc=r.writeToStream(request.Stream)
+	}
+	return $$$OK
+]]></Implementation>
+
+</Method>
+
+<Method name="Unsubscribe">
+<ClassMethod>1</ClassMethod>
+<FormalSpec>request:redis.Request,channel:%String</FormalSpec>
+<ReturnType>%Status</ReturnType>
+<Implementation><![CDATA[
+	set in=request.getChannelEvent(channel) //"^redis.channels("""_channel_""")"
+	if ( '$system.Event.Defined(in) ) {
+		$$$TRACE("Unsubscribe but channel event does not exist!")
+		return $$$OK
+	}
+	set ret=$system.Event.Signal(in,"UNSUBSCRIBE")
+	$$$TRACE("Unsubscribe sent 'UNSUBSCRIBE' to "_in)
+	return $$$OK
+]]></Implementation>
+</Method>
+
+<Method name="Publish">
+<ClassMethod>1</ClassMethod>
+<FormalSpec>request:redis.Request,channel:%String,message:%String</FormalSpec>
+<ReturnType>%Integer</ReturnType>
+<Implementation><![CDATA[
+	$$$TRACE("Publish channel="_channel_" message="_message)
+	set client=$order($$$channels(channel,""))
+	while ( client'="" ) {
+		set event="^redis.channels("""_channel_""","""_client_""")"
+		if ( $system.Event.Defined(event) ) {
+			set ret=$system.Event.Create(event)
+		}
+		set ret=$system.Event.Signal(event,message)
+		$$$TRACE("Publish sent message="_message_" to event="_event_" ret="_ret)
+		set x=$increment(clientCount)
+		set client=$order($$$channels(channel,client))
+	}
+	return clientCount
+]]></Implementation>
+</Method>
+
 <Method name="Start">
 <ClassMethod>1</ClassMethod>
-<FormalSpec>request:redis.Request,stream:%IO.DeviceStream</FormalSpec>
+<FormalSpec>request:redis.Request</FormalSpec>
 <ReturnType>%Status</ReturnType>
 <Implementation><![CDATA[
 	set resource="^redis.monitor("""_request.Client_""")"
+	set stream = request.Stream
 	$$$TRACE("redis.Monitor.Start resource="_resource_" stream.IsOpen="_stream.IsOpen)
 	set ^redis.monitor=1,status=$$$OK
 	set created=$system.Event.Create(resource)
@@ -1736,6 +1910,7 @@ IP/port of client making the request</Description>
 #define	pconf		^redis.conf
 #define clients		^redis.clients
 #define control		^redis.server
+#define channels	^redis.channels
 
 #define	nsPrefix	"redis"
 #define	dbPrefix	"redis"
