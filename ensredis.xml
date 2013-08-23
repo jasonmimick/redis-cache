@@ -8,6 +8,8 @@
     <ProjectItem name="redis.Response" type="CLS"></ProjectItem>
     <ProjectItem name="redis.Service" type="CLS"></ProjectItem>
     <ProjectItem name="redis.SystemUtilities" type="CLS"></ProjectItem>
+    <ProjectItem name="redis.Monitor" type="CLS"></ProjectItem>
+    <ProjectItem name="redis.Production" type="CLS"></ProjectItem>
     <ProjectItem name="redis.Tests" type="CLS"></ProjectItem>
     <ProjectItem name="redis.redis.INC" type="MAC"></ProjectItem>
   </Items>
@@ -1195,20 +1197,25 @@ IP/port of client making the request</Description>
 
 <Method name="readFromStream">
 <ClassMethod>1</ClassMethod>
-<FormalSpec>stream,*request:redis.Request</FormalSpec>
+<FormalSpec>stream,*request:redis.Request,*timeout:%Numeric=-1</FormalSpec>
 <ReturnType>%Status</ReturnType>
 <Implementation><![CDATA[
 	//break
 	Set request=##class(redis.Request).%New()
 	Set request.Stream = stream
+	Set request.Command = ""
 	//Set request.Client=$piece(stream.Remote,"|",2)
 	set request.Arguments=$lb()
-	set numArgsStr=""
+	set numArgsStr="",initialTimeout=timeout
+	$$$TRACE("readFromStream initialTimeout="_initialTimeout_" timeout="_timeout)
 	do {
-		set numArgsStr = stream.ReadLine(,,.status)
+		set timeout=initialTimeout
+		set numArgsStr = stream.ReadLine(,.timeout,.status)
+		if (timeout'=0) $$$TRACE("numArgsStr="_numArgsStr_" timeout="_timeout_" status="_status)
+		Quit:(timeout'=0) 
 		Quit:$$$ISERR(status) 
 	} while ( numArgsStr="")
-	$$$TRACE("numArgsStr="_numArgsStr)
+	Quit:(timeout'=0) $$$OK
 	Quit:$$$ISERR(status) status
 
 	if ( $extract(numArgsStr,1)'="*" ) { // Inline request
@@ -1220,6 +1227,8 @@ IP/port of client making the request</Description>
 	}
 	$$$TRACE("numArgs="_numArgs)
 	set cmdByteCount=""
+	// From here on - we do not timeout!
+	// since we already got the start of a command
 	do {
 		set cmdByteCount=stream.ReadLine(,,.status)
 		$$$TRACE("cmdByteCount="_cmdByteCount)
@@ -1644,17 +1653,55 @@ IP/port of client making the request</Description>
 	if ( '$system.Event.Defined(in) ) {
 		set ret=$system.Event.Create(in)
 	}
+	// any stored message on this channel
+	set numStoredMessages=$get( $$$channelmessages(channel), 0 )
+	for i=1:1:numStoredMessages {
+		set m=$$$channelmessages(channel,i)
+		set r=$$$rBULK($listbuild("message",channel,m))
+		set sc=r.writeToStream(request.Stream)
+	}
 	set subscribed=1
 	while ( subscribed ) {
-		set msgl=$system.Event.WaitMsg(in)
+		set timeout=$$$PUBSUBPOLLINTERAL
+		set msgl=$system.Event.WaitMsg(in,timeout)
 		$$$TRACE("Sub got msg="_$listtostring(msgl))
-		set msg=$list(msgl,2)
-		if ( msg="UNSUBSCRIBE" ) {
+		if ( $list(msgl,1) = 1 ) {
+			set msg=$list(msgl,2)
+			if ( msg="UNSUBSCRIBE" ) {
+				set subscribed=0
+				quit
+			}
+			set r=$$$rBULK($listbuild("message",channel,msg))
+			set sc=r.writeToStream(request.Stream)
+		}
+		if ( $list(msgl,1) = -1 ) {
 			set subscribed=0
+			$$$TRACE("Subscribe WaitMsg return -1, deleted in="_in)
 			quit
 		}
-		set r=$$$rBULK($listbuild("message",channel,msg))
-		set sc=r.writeToStream(request.Stream)
+		// otherwise, WaitMg timedout - 
+		// check wire for any new requests.
+		// - the client won't send command on same socket
+		// - they should use CLIENT SETNAME
+		// - make another connection, set to same name
+		// - and issue unsubscribe from there!
+		/*
+		try {
+		  $$$TRACE("Subscribe - about to read - timeout="_timeout)
+		  Set sc = ##class(redis.Request).readFromStream(request.Stream,.newRequest,.timeout)
+		  $$$TRACE("Subscribe - read - timeout="_timeout)
+		  if ( timeout=0 ) { // did not timeout
+			if ( $isobject(newRequest) ) {
+				$$$TRACE("new request="_newRequest.toString())
+			} else {
+				$$$TRACE("Got new request, but not object:"_newRequest)
+			}
+		  }
+		} catch (exp) {
+			$$$TRACE("Subscribe read try/catch exp="_exp.DisplayString())
+			set subscribed=0
+		}
+		*/
 	}
 	return $$$OK
 ]]></Implementation>
@@ -1683,6 +1730,11 @@ IP/port of client making the request</Description>
 <ReturnType>%Integer</ReturnType>
 <Implementation><![CDATA[
 	$$$TRACE("Publish channel="_channel_" message="_message)
+
+	// save message for later subscriber delivery
+	set i = $i($$$channelmessages(channel))
+	set $$$channelmessages(channel,i)=message
+	
 	set client=$order($$$channels(channel,""))
 	while ( client'="" ) {
 		set event="^redis.channels("""_channel_""","""_client_""")"
@@ -1755,6 +1807,11 @@ IP/port of client making the request</Description>
 		if ( mon["redis.monitor" ) {
 			set sent=$system.Event.Signal(mon,"monitor.stop")
 			write "Sent 'Monitor.Stop' to ",mon," sent=",sent,!
+			set monitors(mon)=""
+		}
+		if ( mon["redis.channels" ) {
+			set sent=$system.Event.Signal(mon,"UNSUBSCRIBE")
+			write "Sent 'UNSUBSCRIBE' to "_mon,!
 			set monitors(mon)=""
 		}
 	}
@@ -1898,6 +1955,51 @@ IP/port of client making the request</Description>
 </Method>
 </Class>
 
+<Class name="redis.Production">
+<IncludeCode>redis.redis</IncludeCode>
+<Super>Ens.Production</Super>
+<TimeChanged>63057,67327.719794</TimeChanged>
+<TimeCreated>63050,42665.000963</TimeCreated>
+
+<XData name="ProductionDefinition">
+<Data><![CDATA[
+<Production Name="redis.Production" TestingEnabled="true" LogGeneralTraceEvents="true">
+  <Description></Description>
+  <ActorPoolSize>2</ActorPoolSize>
+  <Item Name="redis.Service" Category="" ClassName="redis.Service" PoolSize="3" Enabled="true" Foreground="false" Comment="" LogTraceEvents="true" Schedule="">
+    <Setting Target="Adapter" Name="Port">6379</Setting>
+    <Setting Target="Adapter" Name="QSize">10000</Setting>
+    <Setting Target="Host" Name="ArchiveIO">0</Setting>
+    <Setting Target="Host" Name="AlertOnError">1</Setting>
+  </Item>
+</Production>
+]]></Data>
+</XData>
+
+<Method name="OnStart">
+<Description>
+Override this in your Production class to do setup before the Production starts</Description>
+<ClassMethod>1</ClassMethod>
+<FormalSpec>pTimeStarted:%String</FormalSpec>
+<ReturnType>%Status</ReturnType>
+<Implementation><![CDATA[	
+	for glo="^redis.clients","^redis.channels","^redis.channelmessages" {
+		$$$TRACE("redis.Production OnStart - clearing "_glo)
+		kill @glo
+	}
+	Quit $$$OK
+]]></Implementation>
+</Method>
+
+<Method name="OnStop">
+<Description>
+Override this in your Production class to do cleanup after the Production stops</Description>
+<ClassMethod>1</ClassMethod>
+<FormalSpec>pTimeStarted:%String,pForced:%Boolean</FormalSpec>
+<Implementation><![CDATA[	Quit
+]]></Implementation>
+</Method>
+</Class>
 
 <Routine name="redis.redis" type="INC" timestamp="63055,69090.810914"><![CDATA[
 #include Ensemble
@@ -1911,6 +2013,7 @@ IP/port of client making the request</Description>
 #define clients		^redis.clients
 #define control		^redis.server
 #define channels	^redis.channels
+#define channelmessages	^redis.channels.messages
 
 #define	nsPrefix	"redis"
 #define	dbPrefix	"redis"
@@ -1935,6 +2038,10 @@ IP/port of client making the request</Description>
 	#define debug(%msg)	// no debug	
 	#define	CompileStamp    ##expression("	/* Compiled on "_$ZDT($ZTS)_" by "_$username_" RELEASE BUILD*/")
 #endif
+
+#; How long should subscribers alertnate between listening on channel 
+#; and checking for new requests, in seconds
+#define PUBSUBPOLLINTERAL	5
 
 #; data storage definitions
 #define keys		^[$$$clients(request.Client,"db")]keys
