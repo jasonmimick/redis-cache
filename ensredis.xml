@@ -949,16 +949,18 @@ Cache of namespaces we're already checked</Description>
 <ReturnType>redis.Response</ReturnType>
 <Implementation><![CDATA[
 	//cSMEMBERS() [ request.Arguments, result, client ] public {
+	$$$TRACE("SMEMEBERS args="_$listtostring(request.Arguments))
 	set key=$list(request.Arguments,1)
 	if ( '$data($$$sets(key) ) ) {
 		//nill
 		return $$$rDNE
 	}
-	set value=$order($$$sets(key,"")),values=$lb()
+	set value=$order($$$sets(key,"")),values=""
 	while ( value'="" ) {
 		set values=values_$lb(value)
 		set value=$order($$$sets(key,value))
 	}
+	$$$TRACE("SMEMBERS values="_$listtostring(values))
 	return $$$rBULK(values)
 ]]></Implementation>
 </Method>
@@ -1175,6 +1177,11 @@ Cache of namespaces we're already checked</Description>
 			$$$TRACE("OnTearDown sent UNSUBSCRIBE to "_pipe)
 		}
 		set channel=$order(^redis.channels(channel))
+	}
+	if ( $data( $$$clients(client,"monitor)) ) ) {
+		set pipe=$$$clients(client,"monitor")
+		set ret=$system.Event.Delete(pipe)
+		$$$TRACE("CleanUpMonitors deleted event="_pipe)
 	}
 	return $$$OK
 ]]></Implementation>
@@ -1406,6 +1413,7 @@ IP/port of client making the request</Description>
 <Property name="Args">
 <Type>%List</Type>
 <MultiDimensional>1</MultiDimensional>
+<InitialExpression>$listbuild()</InitialExpression>
 </Property>
 
 <Method name="toString">
@@ -1720,12 +1728,15 @@ IP/port of client making the request</Description>
 	while (tail) {
 		if ( '$data(^Ens.Util.LogD(i)) ) {
 			hang 1
+			read x:.2	// chance to quit nicely
+			if (x'="") { quit }
 			continue
 		}
 		set log=^Ens.Util.LogD(i)
 		write i,":",$list(log,8)," ",$list(log,7),!
 		set i=i+1
 	}
+	write "bye.",!
 ]]></Implementation>
 
 </Method>
