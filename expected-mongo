@@ -1,0 +1,16 @@
+127.0.0.1:47484  -->> 127.0.0.1:27017 admin.$cmd  60 bytes  id:0	0
+	query: { whatsmyuri: 1 }  ntoreturn: 1 ntoskip: 0
+127.0.0.1:27017  <<--  127.0.0.1:47484   78 bytes  id:0	0 - 0
+	reply n:1 cursorId: 0
+	{ you: "127.0.0.1:47484", ok: 1.0 }
+127.0.0.1:47484  -->> 127.0.0.1:27017 admin.$cmd  72 bytes  id:1	1
+	query: { getLog: "startupWarnings" }  ntoreturn: -1 ntoskip: 0
+127.0.0.1:27017  <<--  127.0.0.1:47484   86 bytes  id:1	1 - 1
+	reply n:1 cursorId: 0
+	{ totalLinesWritten: 0, log: {}, ok: 1.0 }
+127.0.0.1:47484  -->> 127.0.0.1:27017 admin.$cmd  88 bytes  id:2	2
+	query: { replSetGetStatus: 1.0, forShell: 1.0 }  ntoreturn: -1 ntoskip: 0
+127.0.0.1:27017  <<--  127.0.0.1:47484   92 bytes  id:2	2 - 2
+	reply n:1 cursorId: 0
+	{ ok: 0.0, errmsg: "not running with --replSet" }
+

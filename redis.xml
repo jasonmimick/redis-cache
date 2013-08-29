@@ -302,13 +302,18 @@ pingpong()	public {
 		set sock.LineTerminator=$$$CRLF
 		set sock.ConnectionQueueSize=10000
 		set sock.Port=port
+		set sock.InputBufferSize=626368,sock.OutputBufferSize=626368
+		set sock.TCPSendBuffer=626368,sock.TCPReceiveBuffer=626368
 		set opened=sock.Open()
 		
 		write "opened=",opened,!
 		set maxJobs=5
 		zw sock
+		Do $ZU(68,57,1) ; turn on PSW2NOTHROTTLE bit to bypass throttle
+
 		write "pingpong server listening on port=",port,!
-		//set gotConnection=sock.ListenJob(,"redis.PingServer",,maxJobs,,.sc)
+		set gotConnection=sock.ListenJob(,"redis.PingServer",,maxJobs,,.sc)
+		/*
 listen
 		set gotConnection=sock.Listen(,.sc)
 		write "gotConnection=",gotConnection," sc=",sc,!
@@ -323,16 +328,19 @@ listen
 			write "data=",data," sc=",sc,!
 			write "codes=",$system.Status.GetErrorCodes(sc),!
 			//break
-			if ( +$system.Status.GetErrorCodes(sc)'=6219 ) {
+			  if ( +$system.Status.GetErrorCodes(sc)'=6219 ) {
 				write "ReadLine error---",$ZE,!
 				do $system.OBJ.DisplayError(sc)
 				do sock.Disconnect()
 				goto listen 
+			  } 
+			if ( data = "PING" ) {
+				do sock.Write("+PONG"_$C(13,10),1,.sc)
+				write "sock.Write sc=",sc,!
 			}
-			do sock.Write("+PONG"_$C(13,10),1,.sc)
-			write "sock.Write sc=",sc,!
 		}
 		goto listen
+		*/
 	} catch (error) {
 		do error.OutputToDevice()
 	}
@@ -1025,20 +1033,23 @@ errorTrap
 <FormalSpec>serverSocket:%IO.ServerSocket,jobArg:%String</FormalSpec>
 <ReturnType>%Status</ReturnType>
 <Implementation><![CDATA[
-	set $ZT="errorTrap"
-	set ^ping("con")=$ZTS
-	set remote=serverSocket.Remote
-	set ^ping("con",$i(^ping("con")))=$lb(remote,$ZTS)
-	//set disconHandler = ##class(redis.PingServer).%New()
-	//set serverSocket.DisconnectHandler=disconHandler
-	set data=serverSocket.ReadLine(,,.sc)
-	set ^ping(remote,$i(^ping(remote)))=data
-	do serverSocket.Write("+PONG"_$$$CRLF,1,.sc)
-     	return $$$OK
-errorTrap
-	set $ZT=""
-	set ^ping("error",$i(^ping("error")))=$lb($ZE,$ZTS)
-	return 0
+	while ( 'serverSocket.AtEnd ) {
+		set data=serverSocket.ReadLine(,.sc)
+		//write "data=",data," sc=",sc,!
+		//write "codes=",$system.Status.GetErrorCodes(sc),!
+		//break
+		  if ( +$system.Status.GetErrorCodes(sc)'=6219 ) {
+			//write "ReadLine error---",$ZE,!
+			do $system.OBJ.DisplayError(sc)
+			do sock.Disconnect()
+			quit 
+		  } 
+		if ( data = "PING" ) {
+			do serverSocket.Write("+PONG"_$C(13,10),1,.sc)
+			//write "serverSocket.Write sc=",sc,!
+		}
+	}
+	return $$$OK
 ]]></Implementation>
 </Method>
 </Class></Export>

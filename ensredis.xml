@@ -102,6 +102,7 @@ Cache of namespaces we're already checked</Description>
 <ReturnType>redis.Response</ReturnType>
 <Implementation><![CDATA[
 	// special debugging request to track requests
+	$$$TRACE("MONITOR - request.Client="_request.Client)
 	set sc=##class(redis.Monitor).Start(.request)
 	$$$TRACE("redis.Monitor.Start returned sc="_$system.Status.GetErrorText(sc))
 	return $$$rOK
@@ -1178,7 +1179,7 @@ Cache of namespaces we're already checked</Description>
 		}
 		set channel=$order(^redis.channels(channel))
 	}
-	if ( $data( $$$clients(client,"monitor)) ) ) {
+	if ( $data( $$$clients(client,"monitor")) ) ) {
 		set pipe=$$$clients(client,"monitor")
 		set ret=$system.Event.Delete(pipe)
 		$$$TRACE("CleanUpMonitors deleted event="_pipe)
@@ -1883,14 +1884,28 @@ IP/port of client making the request</Description>
 <ReturnType>%Status</ReturnType>
 <Implementation><![CDATA[
 	set resource="^redis.monitor("""_request.Client_""")"
+	set $$$clients(request.Client,"monitor")=resource
 	set stream = request.Stream
 	$$$TRACE("redis.Monitor.Start resource="_resource_" stream.IsOpen="_stream.IsOpen)
 	set ^redis.monitor=1,status=$$$OK
 	set created=$system.Event.Create(resource)
 	$$$TRACE(resource_" created="_created)
+	set timeout=2
 	while ( stream.IsOpen ) {
-		set msgl=$system.Event.WaitMsg(resource)
-		set msg=$list(msgl,2)
+		set connected=$system.INetInfo.Connected()
+		if ( 'connected ) {
+			$$$TRACE("redis.Monitor.Start loop - connected="_connected)
+			quit
+		}
+		set msgl=$system.Event.WaitMsg(resource,timeout)
+		set msg=$list(msgl,2),code=$list(msgl,1)
+		if ( code=0 ) { 	//timedout
+			continue
+		}
+		if ( code=-1 ) { 	// event resource deleted
+			$$$TRACE("redis.Moitor.Start loop resource deleted code="_code)
+			quit
+		}
 		$$$TRACE(resource_" Msg="_msg)
 		if ( $list(msgl,1)'=1 ) { // not a normal wakeup event
 			$$$TRACE(resource_" got timeout or delete msgl="_$listtostring(msgl))

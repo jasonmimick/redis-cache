@@ -1,0 +1,268 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Export generator="Cache" version="25" zv="Cache for UNIX (SUSE Linux Enterprise Server for x86-64) 2013.1 (Build 446U)" ts="2013-08-28 13:18:57">
+<Routine name="mongod" type="MAC" languagemode="0" timestamp="63041,37952.690112"><![CDATA[
+#include %occInclude 
+  	//Set ListenDev="|TCP|1" Open ListenDev:(:27017:"SA") Set SelectDev=$LB(ListenDev),DevNameIndex=1
+	For i=1:1:3 Close "|TCP|"_i
+  	Set ListenDev="|TCP|1" Open ListenDev:(:27017:"MA") Set SelectDev=$LB(ListenDev),DevNameIndex=1
+	While (1) {
+	   Set ReturnDev=$SYSTEM.Socket.Select(SelectDev)
+	   Write "Select- ReturnDev="_$listtostring(ReturnDev),!
+	   For i=1:1:$ListLength(ReturnDev) {
+	       Set Dev=$Li(ReturnDev)
+	       If Dev=ListenDev {
+	           /* This is the listening device, so it is a new connection. */
+	           Set ConnectedDev="|TCP|"_$Increment(DevNameIndex)
+		   Write "About to Fork Dev="_Dev_" ConnectedDev="_ConnectedDev,!
+	           If '$SYSTEM.Socket.Fork(Dev,ConnectedDev) {
+	               /* Failed to create new device, log error here and continue */
+	               Continue
+	           }
+	           /* Put this new device in the select list. */
+	           Set SelectDev=SelectDev_$LB(ConnectedDev)
+		   Use 0 Write "New Connection SelectDev="_$listtostring(SelectDev),!
+	       } Else {
+	           /* This is a connected device, so data is available to read. */
+	           /* Note that if remote closed the connection, this read command would get  error. */
+	           /* And you need to close this device and remove it from the 'SelectDev' list */
+		   try {
+			do readMessage(Dev)
+			//do wireWatch(Dev)
+			//break
+			do getMsgHeaderFormat(.format)
+			do reader(Dev,.format,.data)
+			use 0 zw data
+			if ( data("opCode") ) = 2004 {
+				do getOPQueryFormat(.format)
+				do reader(Dev,.format,.data)
+				use 0 zw data
+			}
+			Break
+	           	Use Dev Read messageLength#4
+			Use Dev Read requestID#4
+			Use Dev Read responseTo#4
+			Use Dev Read opCode#4
+			Set messageLength=$zlascii(messageLength)
+			Set requestID=$zlascii(requestID)
+			Set responseTo=$zlascii(responseTo)
+			Set opCode=$zlascii(opCode)
+			if ( opCode=2004 ) {   /* OP_QUERY */
+				Use Dev Read *flags
+				// or use $char(0)???
+				Use Dev:(:::$zlchar(0)) Read fullCollectionName
+				// move past cstring end
+				Use Dev Read *term
+				U 0 Write "Read term="_$zlascii(term),!
+				Use Dev Read *numberToSkip
+				Use Dev Read *numberToReturn
+				Use Dev Read *documentLength
+				Use Dev Read document#10	//documentLength
+				For var="flags","numberToSkip","numberToReturn","documentLength","document" {
+					Use 0 Write var,"=",$zlascii(@var),!
+	
+				}			
+			}
+			Break
+			// messageLength includes 4 bytes (1 char) for messageLength
+			//Use Dev Read message#((messageLength)-(4*4)) 
+			Use Dev Read message#((messageLength)-16) 
+		   	Use 0 Write "message["_(messageLength)_"]=",message,!
+			ZZDUMP message u 0 w !
+			set ^mongod.test=message
+			//set json=$$decodeBSON(message)
+			//Use 0 write "json=",json,!
+			Set response="{ you: ""127.0.0.1:42379"", ok: 1.0 }"
+			Set rMsgLen=$length(response)+(4*5)  // 5 numbers * 4 bytes
+			Use Dev Write $zlchar(rMsgLen)
+			Use Dev Write $zlchar(0)  // responseFlags
+			Use Dev Write $zlchar(0),$zlchar(0)  // cursorID
+			Use Dev Write $zlchar(0)  // startingFrom
+			Use Dev Write $zlchar(1)  // numberReturned
+			for i=0:1:($l(response)\4) {
+				set chunk=$zlascii(response,(4*i)+1)
+				if ( chunk = -1 ) {
+					set left=$extract(response,(4*i)+1,*)
+					set i=$length(left) 	// 3,2,1
+					set chunk=0
+					while ( i>0 ) {
+						set byte=$ascii($extract(left,i))
+						set:(i>1) byte=byte*256
+						set chunk=chunk+byte
+						set i=i-1
+					}
+				}
+				Use Dev Write chunk
+			}
+			Use Dev Write *-3   // Flush
+	           } catch (exception) {
+		        Use 0 Do exception.OutputToDevice()
+			Close Dev
+			Set ii=$listfind(SelectDev,Dev)
+			Set $list(SelectDev,ii,ii+1) = ""
+			Use 0 Write "SelectDev="_$listtostring(SelectDev),!
+		   }
+		   Continue
+	       }
+	   }
+	}	
+	Quit
+decodeDocument(b) public {  // decode a string of BSON
+	// use zlchar in chunks of 4
+	set json=""
+	for i=0:1:($l(b)\4) {
+		set chunk=$extract(b,(4*i)+1)
+		set strChunk=$zlchar(chunk)
+		use 0 write "chunk="_chunk_" strChunk="_strChunk,!
+		set json=json_strChunk
+	}
+	return json
+}		
+bson(json) public {
+	// bson encode a json string
+	set len=$length(json)-1
+	//	set bson=$zlchar(len)_
+
+}
+elistToBSON(elist)	public {
+}
+testToBSON()	{
+
+	set o("jim")=$lb(1,2,3,4,5,"Jim")
+	set o("nest","array2")=$lb("tom","dick","harry")
+	set o("nest","tom")="oifsoifjsdoifj"
+	set o("ok")="1.0"
+	set o("you")="127.0.0.1:42379"
+}
+readMessage(device) {
+	set stream=##class(%Stream.TmpBinary).%New()
+	set devStream=##class(%IO.DeviceStream).AttachNew(device,.sc)
+	set devStream.CharEncoding="binary"
+	if ( $$$ISERR(sc) ) { use 0 do $system.OBJ.DisplayError(sc) quit }
+	while ( 1 ) {
+		//use device read char#4
+		set msgLengthRaw=devStream.Read(4,,.sc)
+		if ( $$$ISERR(sc) ) { break }
+		set msgLength=($ascii(msgLengthRaw)-4)	// each char is 4 bytes
+		use 0 write "Got msgLength=",msgLength,!
+		//use device read message#(msgLength-4)
+		set message=devStream.Read(msgLength,,.sc)
+		//break
+		break:$$$ISERR(sc)
+		use 0 write "Got message=",message,!
+		//set sc=stream.Write(message)
+		do process(message,.response)
+		// write message header
+		// calc len
+		//do devStream.Write(len)
+		
+		do devStream.Write(response,1,.sc)
+		break:$$$ISERR(sc)	
+	}
+}
+process(message,response)	public {
+	// parse header
+	set ^mongo.msg($i(^mongo.msg))=message
+	set requestID=$zlascii($extract(message,1,4))
+	set responseTo=$zlascii($extract(message,5,8))
+	set opCode=$zlascii($extract(message,9,12))
+	//break
+
+	if ( opCode=2004 )  { //OP_QUERY
+		set flags=$zlascii($extract(message,13,16))
+		set eos=$find($extract(message,17,*),$c(0))
+		set collectionName=$extract(message,17,17+eos-3)
+		set curPtr=17+eos+-3+1+1
+		set numberToSkip=$zlascii($extract(message,curPtr,curPtr+3))
+		set curPtr=curPtr+4
+		set numberToReturn=$zlascii($extract(message,curPtr,curPtr+3))
+		set curPtr=curPtr+4
+		// now read bson document
+		// first byte is length of document
+		set docLen=$zlascii($extract(message,curPtr,curPtr+3))
+		set curPtr=curPtr+4
+		set document=$extract(message,curPtr,curPtr+docLen)
+		//set docResponse=$c(31,2)_"you"_$c(0,14)_"127.0.0.1:4321"_$c(0,1)_"ok"_$c(0,1,0,0,0,0)
+		set docResponse="N"_$c(0,0,0,2)_"you"_$c(0,14)_"127.0.0.1:4321"_$c(0,1)_"ok"_$c(0,1,0,0,0,0)
+		set r="" //length
+		set r=r_$zlchar(requestID)
+		set r=r_$zlchar(responseTo)
+		set r=r_$zlchar(opCode)
+		// end std msg header
+		set r=r_$zlchar(0)	// responseFlags
+		set r=r_$zlchar(0)_$zlchar(0)	// cursorID
+		set r=r_$zlchar(0)	// startingFrom
+		set r=r_$zlchar(1)	// number docs returned
+		set r=r_docResponse
+		set r=r_$zlchar(0)
+		set len=$length(r)+4
+		break
+		set r=$zlchar(len)_r
+		set response=r
+		u 0 write "----->" break 
+	}
+}
+wireWatch(device) 	{
+	// read chars from device and dump to console
+	set tab=-10
+	while (1)   {
+		use device read *char 
+		//use device read char#4 
+		quit:'$test
+		set tab=(tab+10)#70  
+		use 0 write ?tab,char,":",$zlascii(char) 
+		if (tab=60) use 0 write !
+		//use 0 write char,":",$zlascii(char),!
+		//use device write char
+	}
+	use 0 write "read failed"!
+	quit
+}
+getMsgHeaderFormat(format) {
+	kill format
+	set format(1,"messageLength")="int32"
+	set format(2,"requestID")="int32"
+	set format(3,"responseTo")="int32"
+	set format(4,"opCode")="int32"
+	set format=4
+}
+getOPQueryFormat(format) {
+	kill format
+	set format($i(format),"flag")="int32"
+	set format($i(format),"fullCollectionName")="cstring"
+	set format($i(format),"numberToSkip")="int32"
+	set format($i(format),"numberToReturn")="int32"
+	set format($i(format),"query")="document"
+}	
+reader(device,format,data)	public {
+	// based on a format array, return a data array
+	set fieldI=$order(format(0))
+	while ( fieldI'="" ) {
+		set field=$order(format(fieldI,""))
+		set dataType=format(fieldI,field)
+		if dataType="int32" {
+			use device read char#4
+			set data(field)=$zlascii(char)
+		}
+		if dataType="int64" {
+			use device read wchar#8
+			set data(field)=$zlascii(wchar)  // not sure???
+
+		}
+		if dataType="cstring" {
+			break
+			use device:(:::$zlchar(0)) read cstring
+			set data(field)=cstring
+		
+		}
+		if dataType="document" {
+			use device read numBytes#4
+			set numBytes=$zlascii(numBytes)
+			break
+			use device read doc#numBytes
+			set data(field)=doc
+		}
+		set fieldI=$order(format(fieldI))
+	}
+}
+]]></Routine>
+</Export>

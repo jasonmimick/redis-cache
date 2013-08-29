@@ -1,0 +1,106 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Export generator="Cache" version="25" zv="Cache for Windows (x86-64) 2013.1 (Build 446U)" ts="2013-08-29 17:58:29">
+<Class name="mongo.BSON">
+<Super>%RegisteredObject</Super>
+<TimeChanged>63063,58107.274305</TimeChanged>
+<TimeCreated>63063,41897.055173</TimeCreated>
+
+<Method name="test">
+<ClassMethod>1</ClassMethod>
+<Implementation><![CDATA[
+
+	set whatUpDoc=$C(16)_"whatsmyuri"_$c(0,1,0,0,0,0)
+	do ..parse(whatUpDoc,.j)
+	zw j
+	set helloDoc = $C(16)_$c(2)_"hello"_$c(0)_$C(6)_"world"_$C(0,0)
+	do ..parse(helloDoc,.j)
+	zw j
+	
+	set k=2
+	set k(1)=$lb(2,"you","127.0.0.1:47484")
+	set k(2)=$lb(1,"ok",1.0)
+	set bson=..bsonize(.k)
+	zw bson
+	break
+]]></Implementation>
+</Method>
+
+<Method name="bsonize">
+<ClassMethod>1</ClassMethod>
+<FormalSpec><![CDATA[&data,&bson:%String=""]]></FormalSpec>
+<ReturnType>%String</ReturnType>
+<Implementation><![CDATA[
+	for i=1:1:data {
+		set dataType=$list(data(i),1),name=$list(data(i),2),value=$list(data(i),3)
+		if ( dataType=1 ) { //Double
+			set bson=bson_$C(1)_name_$C(0)_$zlchar(value)
+		}
+		if ( dataType=2 ) { // String
+			set bson=bson_$C(2)_name_$char(0)_$char($length(value))_value_$c(0)
+		}
+	}
+	break
+	set len=4+$l(bson)+4
+	return $zlchar(len)_bson_$zlchar(0)
+]]></Implementation>
+</Method>
+
+<Method name="cstring">
+<ClassMethod>1</ClassMethod>
+<FormalSpec>document:%String,start:%Integer,*end:%Integer</FormalSpec>
+<ReturnType>%String</ReturnType>
+<Implementation><![CDATA[
+	//break
+	set end=$find($extract(document,start,*),$c(0))
+	set cstring=$extract(document,start,start+end-3)
+	set end=start+end-3+1+1
+	return cstring
+]]></Implementation>
+</Method>
+
+<UDLText name="T">
+<Content><![CDATA[
+// return a JSON string for this document
+
+]]></Content>
+</UDLText>
+
+<Method name="parse">
+<ClassMethod>1</ClassMethod>
+<FormalSpec>document:%String,*parsed</FormalSpec>
+<Implementation><![CDATA[
+	//break
+	set docSize=$ascii($extract(document,1))
+	set element=$ascii($extract(document,2))
+	
+	set dataType=$case( element,
+		1:"double",
+		2:"string",
+		3:"document",
+		4:"array",
+		5:"binary",
+		6:"UNDEF",
+		7:"ObjectId",
+		8:"Boolean",
+		9:"UTCDateTime",
+		10:"Null",
+		:"?")
+
+	if dataType="string" {
+		set ename=..cstring(document,3,.end)
+		set strLen=$ascii($extract(document,end))
+		set value=..cstring(document,end+1,.end)
+		set parsed($i(parsed))=$lb(2,ename,value)	//type,name,value
+	}
+	
+	if ( dataType = "?" ) {	// no type, just read e_name
+		//break
+		set ename=..cstring(document,2,.end)
+		set chunk=$zlascii($extract(document,end,end+3))
+		set parsed($i(parsed))=$lb("?",ename,chunk)
+		//return "{_"""_ename_""":"_chunk_"}"
+	}
+]]></Implementation>
+</Method>
+</Class>
+</Export>
