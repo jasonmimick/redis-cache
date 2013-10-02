@@ -16,12 +16,20 @@
 	do ..parse(helloDoc,.j)
 	zw j
 	
+	break
 	set k=2
 	set k(1)=$lb(2,"you","127.0.0.1:47484")
 	set k(2)=$lb(1,"ok",1.0)
 	set bson=..bsonize(.k)
 	zw bson
+	set ^bson=bson
 	break
+
+	k k
+	set k=1
+	set k(1)=$lb(2,"hello","world")
+	set bb=..bsonize(.k)
+	zzdump bb
 ]]></Implementation>
 </Method>
 
@@ -33,15 +41,15 @@
 	for i=1:1:data {
 		set dataType=$list(data(i),1),name=$list(data(i),2),value=$list(data(i),3)
 		if ( dataType=1 ) { //Double
-			set bson=bson_$C(1)_name_$C(0)_$zlchar(value)
+			set bson=bson_$C(1)_name_$C(0)_$zqchar(value)
 		}
 		if ( dataType=2 ) { // String
-			set bson=bson_$C(2)_name_$char(0)_$char($length(value))_value_$c(0)
+			// plus 1 on len terminating \x00	
+			set bson=bson_$C(2)_name_$char(0)_$zlchar($length(value)+1)_value_$c(0)
 		}
 	}
-	break
-	set len=4+$l(bson)+4
-	return $zlchar(len)_bson_$zlchar(0)
+	set len=4+$length(bson)+1
+	return $zlchar(len)_bson_$char(0)
 ]]></Implementation>
 </Method>
 
