@@ -5,14 +5,15 @@ Class redis.Production Extends Ens.Production
 
 XData ProductionDefinition
 {
-<Production Name="redis.Production" TestingEnabled="true" LogGeneralTraceEvents="true">
+<Production Name="redis.Production" TestingEnabled="true" LogGeneralTraceEvents="false">
   <Description></Description>
   <ActorPoolSize>2</ActorPoolSize>
-  <Item Name="redis.Service" Category="" ClassName="redis.Service" PoolSize="3" Enabled="true" Foreground="false" Comment="" LogTraceEvents="true" Schedule="">
+  <Item Name="redis.Service" Category="" ClassName="redis.Service" PoolSize="50" Enabled="true" Foreground="false" Comment="" LogTraceEvents="false" Schedule="">
     <Setting Target="Adapter" Name="Port">6379</Setting>
-    <Setting Target="Adapter" Name="QSize">10000</Setting>
+    <Setting Target="Adapter" Name="QSize">1000</Setting>
     <Setting Target="Host" Name="ArchiveIO">0</Setting>
     <Setting Target="Host" Name="AlertOnError">1</Setting>
+    <Setting Target="Adapter" Name="StayConnected">-1</Setting>
   </Item>
 </Production>
 }
