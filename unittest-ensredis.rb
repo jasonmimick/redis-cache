@@ -3,7 +3,8 @@
 require "rubygems"
 require "redis"
 
-redis = Redis.new( :host => "healthshare.us", :port => 6379)
+# redis = Redis.new( :host => "healthshare.us", :port => 6379)
+redis = Redis.new( :host => "localhost", :port => 6379)
 
 #DEL
 del = redis.del("incr")

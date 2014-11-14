@@ -408,16 +408,19 @@ Method HEXISTS(request As redis.Request) As redis.Response [ Private ]
 
 Method DEL(request As redis.Request) As redis.Response [ Private ]
 {
-	
-    set key=$list(request.Arguments,1)
-    $$$TRACE("DEL key="_key)
-    if ( '$data($$$keys(key)) ) {  //'
-		$$$TRACE("DEL key does not exist")
-		return $$$rDNE
+	set keysDeleted = 0
+	for i=1:1:$listlength(request.Arguments) {
+	    set key=$list(request.Arguments,i)
+    	$$$TRACE("DEL key="_key)
+    	if ( '$data($$$keys(key)) ) {  //'
+			$$$TRACE("DEL key does not exist")
+			continue	
+    	}
+    	// TODO: Lock before kill, check $Test, etc
+    	kill $$$keys(key)
+		set keysDeleted = keysDeleted + 1
     }
-    // TODO: Lock before kill, check $Test, etc
-    kill $$$keys(key)
-    set result=$$$rOK
+	set result=$$$rINT(keysDeleted)
     $$$TRACE("DEL result="_result.toString())
     return result
 }
@@ -970,5 +973,4 @@ Method KEYS(request As redis.Request) As redis.Response [ Private ]
 	return result
 }
 
-///foo
 }
